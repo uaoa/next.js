@@ -1142,6 +1142,7 @@ export default class NextNodeServer extends BaseServer<
     if (!existingServerContext) {
       routerServerGlobal[RouterServerContextSymbol][relativeProjectDir] = {
         render404: this.render404.bind(this),
+        getAssetPrefix: this.getAssetPrefix.bind(this),
       }
     }
     routerServerGlobal[RouterServerContextSymbol][
