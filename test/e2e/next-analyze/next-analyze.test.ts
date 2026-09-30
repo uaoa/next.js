@@ -1,4 +1,5 @@
 import { nextTestSetup } from 'e2e-utils'
+import { validateGraphDump } from '../../lib/analyze-graph-schema'
 import { shouldUseTurbopack } from 'next-test-utils'
 import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
@@ -90,6 +91,7 @@ describe('next analyze', () => {
   })
 
   it('captures a named snapshot, then streams its versioned graph without building', async () => {
+    const started = Date.now()
     const name = 'JSON snapshot'
     const fresh = await next.runCommand([
       'analyze',
@@ -106,6 +108,11 @@ describe('next analyze', () => {
     // PORT from the environment must not make replay try to serve the UI.
     expect(named.exitCode).toBe(0)
     expect(named.stderr).not.toContain('Analyzing a production build')
+    validateGraphDump(named.stdout)
+    // Log the real fixture's output size and elapsed time without pasting its graph.
+    console.log(
+      `Analyzer NDJSON fixture: ${Buffer.byteLength(named.stdout)} bytes in ${Date.now() - started}ms`
+    )
     const records = named.stdout
       .trim()
       .split('\n')
@@ -126,6 +133,7 @@ describe('next analyze', () => {
     if (!namedSnapshot) throw new Error('Named analyzer snapshot missing')
     const id: string = namedSnapshot.id
     expect(id).toMatch(/^\d{8}-\d{6}-(?:[a-f0-9]{7}|local)-[a-f0-9]{12}$/)
+    expect(history.snapshots[0].snapshotName).toBe('JSON snapshot')
     expect(records[0].snapshot_id).toBe(id)
     expect(
       JSON.parse(
@@ -145,6 +153,7 @@ describe('next analyze', () => {
       id,
     ])
     expect(replay.exitCode).toBe(0)
+    validateGraphDump(replay.stdout)
     expect(replay.stdout).toBe(named.stdout)
     const latest = await next.runCommand(['analyze', '--graph-json'])
     expect(latest.exitCode).toBe(0)
@@ -157,7 +166,17 @@ describe('next analyze', () => {
       id,
     ])
     expect(replayAgain.exitCode).toBe(0)
+    validateGraphDump(replayAgain.stdout)
     expect(replayAgain.stdout).toBe(replay.stdout)
+    const alias = await next.runCommand([
+      'experimental-analyze',
+      '--graph-json',
+      '--snapshot',
+      id,
+    ])
+    expect(alias.exitCode).toBe(0)
+    validateGraphDump(alias.stdout)
+    expect(alias.stdout).toBe(replay.stdout)
     expect(replay.stderr).not.toContain('Analyzing a production build')
     const root = await next.runCommand([
       'analyze',
@@ -168,6 +187,7 @@ describe('next analyze', () => {
       '/',
     ])
     expect(root.exitCode).toBe(0)
+    validateGraphDump(root.stdout)
     const rootRecords = root.stdout
       .trim()
       .split('\n')
@@ -199,6 +219,15 @@ describe('next analyze', () => {
     ])
     expect(traversal.exitCode).not.toBe(0)
     expect(traversal.stdout).toBe('')
+    for (const args of [
+      ['analyze', '--output=xml'],
+      ['analyze', '--route', '/'],
+      ['analyze', '--snapshot', id],
+    ]) {
+      const invalid = await next.runCommand(args)
+      expect(invalid.exitCode).not.toBe(0)
+      expect(invalid.stdout).toBe('')
+    }
 
     const missingName = await next.runCommand([
       'analyze',
@@ -279,6 +308,38 @@ describe('next analyze', () => {
     } finally {
       writeFileSync(moduleFile, original)
     }
+  })
+
+  it('replays a snapshot created by next build --analyze', async () => {
+    const build = await next.runCommand(['build', '--analyze'])
+    if (build.exitCode !== 0) {
+      throw new Error(
+        `next build --analyze failed: ${build.stderr}\n${build.stdout}`
+      )
+    }
+    const analyzeDir = path.join(next.testDir, '.next/diagnostics/analyze')
+    const history = JSON.parse(
+      readFileSync(path.join(analyzeDir, 'history/history.json'), 'utf8')
+    )
+    const id = history.snapshots[0].id
+    const replay = await next.runCommand([
+      'analyze',
+      '--graph-json',
+      '--snapshot',
+      id,
+    ])
+    expect(replay.exitCode).toBe(0)
+    validateGraphDump(replay.stdout)
+    expect(
+      replay.stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))[0]
+    ).toMatchObject({
+      type: 'meta',
+      snapshot_id: id,
+    })
+    expect(replay.stderr).not.toContain('Analyzing a production build')
   })
   ;['-o', '--output'].forEach((flag) => {
     describe(`with ${flag} flag`, () => {

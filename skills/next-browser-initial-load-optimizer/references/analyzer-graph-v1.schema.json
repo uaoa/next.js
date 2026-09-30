@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nextjs:analyze:analyzer-graph:v1",
+  "title": "Next.js analyzer graph v1 record",
+  "description": "Validate one JSON object per NDJSON line. Stream ordering, completeness, and cross-record joins are separate checks described in SKILL.md. Unknown additive fields on known records are allowed.",
+  "oneOf": [
+    { "$ref": "#/$defs/meta" },
+    { "$ref": "#/$defs/module" },
+    { "$ref": "#/$defs/route" },
+    { "$ref": "#/$defs/output" },
+    { "$ref": "#/$defs/part" }
+  ],
+  "$defs": {
+    "index": { "type": "integer", "minimum": 0 },
+    "size": { "type": "number", "minimum": 0 },
+    "identity": { "type": "string" },
+    "meta": {
+      "type": "object",
+      "required": [
+        "type",
+        "schema_version",
+        "snapshot_id",
+        "module_index_hash",
+        "route_count",
+        "selected_routes"
+      ],
+      "properties": {
+        "type": { "const": "meta" },
+        "schema_version": { "const": 1 },
+        "snapshot_id": { "type": "string" },
+        "module_index_hash": { "type": ["string", "null"] },
+        "route_count": { "$ref": "#/$defs/index" },
+        "selected_routes": { "$ref": "#/$defs/index" }
+      },
+      "additionalProperties": true
+    },
+    "module": {
+      "type": "object",
+      "required": ["type", "ident", "path", "dependencies"],
+      "properties": {
+        "type": { "const": "module" },
+        "ident": { "$ref": "#/$defs/identity" },
+        "path": { "type": "string" },
+        "dependencies": {
+          "type": "object",
+          "required": ["sync", "async", "traced"],
+          "properties": {
+            "sync": { "$ref": "#/$defs/identities" },
+            "async": { "$ref": "#/$defs/identities" },
+            "traced": { "$ref": "#/$defs/identities" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "identities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identity" }
+    },
+    "route": {
+      "type": "object",
+      "required": ["type", "route", "route_index", "entries", "coverage"],
+      "properties": {
+        "type": { "const": "route" },
+        "route": { "type": "string" },
+        "route_index": { "$ref": "#/$defs/index" },
+        "entries": { "type": "null" },
+        "coverage": {
+          "type": "object",
+          "required": ["entries", "groups", "load_edges"],
+          "properties": {
+            "entries": { "const": "unknown" },
+            "groups": { "const": "unknown" },
+            "load_edges": { "const": "unknown" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "required": [
+        "type",
+        "route",
+        "route_index",
+        "filename",
+        "modules",
+        "coverage",
+        "unresolved_references"
+      ],
+      "properties": {
+        "type": { "const": "output" },
+        "route": { "type": "string" },
+        "route_index": { "$ref": "#/$defs/index" },
+        "filename": { "type": "string" },
+        "modules": { "type": "null" },
+        "coverage": { "const": "unknown" },
+        "unresolved_references": { "type": "null" }
+      },
+      "additionalProperties": true
+    },
+    "part": {
+      "type": "object",
+      "required": [
+        "type",
+        "route",
+        "route_index",
+        "filename",
+        "source_path",
+        "size",
+        "compressed_size"
+      ],
+      "properties": {
+        "type": { "const": "part" },
+        "route": { "type": "string" },
+        "route_index": { "$ref": "#/$defs/index" },
+        "filename": { "type": "string" },
+        "source_path": { "type": "string" },
+        "size": { "$ref": "#/$defs/size" },
+        "compressed_size": { "$ref": "#/$defs/size" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

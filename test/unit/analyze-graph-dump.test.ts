@@ -1,4 +1,5 @@
 import {
+  cp,
   mkdtemp,
   mkdir,
   readFile,
@@ -9,8 +10,13 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
+import Ajv2020 from 'ajv/dist/2020'
 import { dumpAnalyzeGraph } from '../../packages/next/src/build/analyze/graph-dump'
 import { writeAnalyzeSnapshot } from '../../packages/next/src/build/analyze/snapshot'
+import {
+  isValidGraphRecord,
+  validateGraphDump,
+} from '../lib/analyze-graph-schema'
 
 const id = '20260411-120000-local'
 
@@ -121,6 +127,7 @@ describe('NDJSON analyzer graph', () => {
 
   it('streams deterministic typed records and preserves repeated route occurrences', async () => {
     const first = await dump('/')
+    validateGraphDump(first.output)
     expect((await dump('/')).output).toBe(first.output)
     expect(first.records[0]).toMatchObject({
       type: 'meta',
@@ -143,6 +150,74 @@ describe('NDJSON analyzer graph', () => {
     expect(
       first.records.find((record) => record.type === 'output')
     ).toMatchObject({ modules: null, coverage: 'unknown' })
+  })
+
+  it('ships a usable schema within the skill directory', async () => {
+    const skill = join(
+      __dirname,
+      '../../skills/next-browser-initial-load-optimizer'
+    )
+    const installed = join(root, 'installed-skill')
+    await cp(skill, installed, { recursive: true })
+    const guide = await readFile(join(installed, 'SKILL.md'), 'utf8')
+    expect(guide).toContain(
+      '[references/analyzer-graph-v1.schema.json](references/analyzer-graph-v1.schema.json)'
+    )
+    expect(guide).not.toContain('GRAPH-DUMP.md')
+    const schema = JSON.parse(
+      await readFile(
+        join(installed, 'references/analyzer-graph-v1.schema.json'),
+        'utf8'
+      )
+    )
+    expect(schema.$id).toBe('urn:nextjs:analyze:analyzer-graph:v1')
+    const validate = new Ajv2020().compile(schema)
+    expect(validate((await dump('/')).records[0])).toBe(true)
+  })
+
+  it('validates known fields but allows additive v1 fields', async () => {
+    const { records } = await dump('/')
+    const meta = records[0]
+    expect(isValidGraphRecord({ ...meta, optional_future_field: true })).toBe(
+      true
+    )
+    expect(isValidGraphRecord({ ...meta, type: 'future_record' })).toBe(false)
+    expect(isValidGraphRecord({ ...meta, schema_version: 2 })).toBe(false)
+    const missingCount = { ...meta }
+    delete missingCount.route_count
+    expect(isValidGraphRecord(missingCount)).toBe(false)
+    expect(isValidGraphRecord({ ...meta, route_count: -1 })).toBe(false)
+    expect(
+      isValidGraphRecord({
+        ...records.find((record) => record.type === 'output'),
+        coverage: 'guessed',
+      })
+    ).toBe(false)
+    expect(
+      isValidGraphRecord({
+        ...records.find((record) => record.type === 'part'),
+        compressed_size: null,
+      })
+    ).toBe(false)
+  })
+
+  it('checks stream framing, meta order and route/output joins separately', async () => {
+    const { output, records } = await dump('/')
+    expect(() => validateGraphDump(output.slice(0, -1))).toThrow('Truncated')
+    expect(() =>
+      validateGraphDump(output + JSON.stringify(records[0]) + '\n')
+    ).toThrow('Duplicate')
+    const part = records.find((record) => record.type === 'part')
+    expect(() =>
+      validateGraphDump(
+        output + JSON.stringify({ ...part, route_index: 99 }) + '\n'
+      )
+    ).toThrow('Unknown route')
+    expect(() =>
+      validateGraphDump(
+        output + JSON.stringify({ ...part, filename: 'missing.js' }) + '\n'
+      )
+    ).toThrow('Unknown output')
   })
 
   it.each([2, 'legacy'] as const)(

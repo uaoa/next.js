@@ -180,6 +180,14 @@ Then give the agent this prompt:
 After every edit, verify the page still works at runtime using the next-dev-loop Skill.
 ```
 
+### `next-browser-initial-load-optimizer`
+
+The [`next-browser-initial-load-optimizer`](https://github.com/vercel/next.js/tree/canary/skills/next-browser-initial-load-optimizer) Skill investigates browser bundle costs using a versioned analyzer graph. First capture a snapshot with `next analyze --output`, then stream its graph with `next analyze --graph-json` (or replay a snapshot from `next build --analyze`). The Skill explains how to select a named snapshot, choose a useful graph analysis, and verify one change at a time. Initial request timing still requires browser evidence; a build-time graph does not determine it by itself.
+
+```bash filename="Terminal"
+npx skills add vercel/next.js --skill next-browser-initial-load-optimizer
+```
+
 ### `next-cache-components-adoption`
 
 The [`next-cache-components-adoption`](https://www.skills.sh/vercel/next.js/next-cache-components-adoption) Skill migrates an app to [Cache Components](/docs/app/getting-started/caching):
