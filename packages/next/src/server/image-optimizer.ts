@@ -488,6 +488,7 @@ export class ImageOptimizerCache {
           revalidate: effectiveRevalidate,
         }
         await this.cacheHandler.set(cacheKey, valueWithRevalidate, {
+          kind: IncrementalCacheKind.IMAGE,
           cacheControl: {
             revalidate: effectiveRevalidate,
             expire: cacheControl?.expire,
