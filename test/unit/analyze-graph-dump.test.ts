@@ -66,10 +66,11 @@ function modules(version: number | 'legacy' = 1) {
   )
 }
 
-function route() {
+function route(entries?: Array<Record<string, unknown>>) {
   return file(
     {
       schema_version: 1,
+      route_entries: entries,
       sources: [
         { parent_source_index: null, path: 'app/' },
         { parent_source_index: 0, path: 'page.tsx' },
@@ -173,6 +174,39 @@ describe('NDJSON analyzer graph', () => {
     expect(schema.$id).toBe('urn:nextjs:analyze:analyzer-graph:v1')
     const validate = new Ajv2020().compile(schema)
     expect(validate((await dump('/')).records[0])).toBe(true)
+  })
+
+  it('validates typed endpoint roots and nested client references', async () => {
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route([
+        {
+          route_entry_id: 'app-client',
+          module_ident: 'app',
+          module_path: 'app/page.tsx',
+          role: 'client',
+          runtime: null,
+          entry_kind: 'client_bootstrap',
+          client_references: [
+            {
+              module_ident: 'dep',
+              module_path: 'dep/index.js',
+              reference_kind: 'ecmascript',
+            },
+          ],
+        },
+      ])
+    )
+    const { output, records } = await dump('/')
+    validateGraphDump(output)
+    const entry = records.find((record) => record.type === 'route').entries[0]
+    expect(entry.client_references[0].module_ident).toBe('dep')
+    expect(
+      isValidGraphRecord({
+        ...records.find((record) => record.type === 'route'),
+        entries: [{ ...entry, client_references: [{ module_ident: 42 }] }],
+      })
+    ).toBe(false)
   })
 
   it('validates known fields but allows additive v1 fields', async () => {

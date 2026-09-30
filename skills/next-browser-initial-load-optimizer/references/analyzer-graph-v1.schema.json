@@ -58,6 +58,40 @@
       "type": "array",
       "items": { "$ref": "#/$defs/identity" }
     },
+    "clientReference": {
+      "type": "object",
+      "required": ["module_ident", "module_path", "reference_kind"],
+      "properties": {
+        "module_ident": { "$ref": "#/$defs/identity" },
+        "module_path": { "type": "string" },
+        "reference_kind": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "route_entry_id",
+        "module_ident",
+        "module_path",
+        "role",
+        "entry_kind",
+        "client_references"
+      ],
+      "properties": {
+        "route_entry_id": { "type": "string" },
+        "module_ident": { "$ref": "#/$defs/identity" },
+        "module_path": { "type": "string" },
+        "role": { "type": "string" },
+        "runtime": { "type": ["string", "null"] },
+        "entry_kind": { "type": ["string", "null"] },
+        "client_references": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/clientReference" }
+        }
+      },
+      "additionalProperties": true
+    },
     "route": {
       "type": "object",
       "required": ["type", "route", "route_index", "entries", "coverage"],
@@ -65,12 +99,17 @@
         "type": { "const": "route" },
         "route": { "type": "string" },
         "route_index": { "$ref": "#/$defs/index" },
-        "entries": { "type": "null" },
+        "entries": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+          ]
+        },
         "coverage": {
           "type": "object",
           "required": ["entries", "groups", "load_edges"],
           "properties": {
-            "entries": { "const": "unknown" },
+            "entries": { "enum": ["exact", "unknown"] },
             "groups": { "const": "unknown" },
             "load_edges": { "const": "unknown" }
           },
