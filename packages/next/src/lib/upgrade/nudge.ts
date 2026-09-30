@@ -282,7 +282,8 @@ async function nudgeUpgradeForAgent(
   reminder: UpgradeReminder,
   nudgeId: string,
   agentProduct: string,
-  telemetry: Telemetry | null
+  telemetry: Telemetry | null,
+  policyEvent: ReturnType<typeof eventAIUpgradePolicyObserved>
 ): Promise<void> {
   let summary: string
   let recommendation: string
@@ -359,6 +360,7 @@ ${reference ? `Reference: ${reference}` : ''}`
     )
   }
   if (retryAllowed) {
+    telemetry?.record(policyEvent)
     Log.warn(
       `${summary} This command is continuing after the upgrade reminder.${reference ? `\nReference: ${reference}` : ''}`
     )
@@ -373,6 +375,7 @@ ${reference ? `Reference: ${reference}` : ''}`
           options.directory,
           resolve(options.directory, options.distDir),
           [
+            policyEvent,
             eventAIUpgradeNudgeShown({
               nudgeId,
               recipient: 'agent',
@@ -560,21 +563,22 @@ export async function nudgeUpgrade(
   }
   // Observe the effective policy even when assessment finds no upgrade to offer.
   const telemetry = telemetryOptions?.telemetry ?? null
-  if (telemetry) {
-    telemetry.record(
-      eventAIUpgradePolicyObserved({
-        configuredPolicy: config.configuredPolicy ?? null,
-        effectivePolicy: policy,
-        policySource: requested ? 'environment' : 'config',
-        sourceCommand: command,
-      })
-    )
-  }
-
+  const policyEvent = eventAIUpgradePolicyObserved({
+    configuredPolicy: config.configuredPolicy ?? null,
+    effectivePolicy: policy,
+    policySource: requested ? 'environment' : 'config',
+    sourceCommand: command,
+  })
   if (requested && isCI) {
+    telemetry?.record(policyEvent)
     return
   }
+
+  // An agent's stopped command sends policy and nudge together before synchronous exit.
   const agent = await getAgentName()
+  if (!agent) {
+    telemetry?.record(policyEvent)
+  }
   const installedVersion = process.env.__NEXT_VERSION || 'unknown'
   let stopBefore: NudgeKind | null = null
   if (!agent) {
@@ -595,16 +599,26 @@ export async function nudgeUpgrade(
       return
     }
   }
-  const reminder = await (stopBefore === null && initialAssessment
-    ? initialAssessment
-    : assessUpgrade(
-        directory,
-        { ...config, experimental: { agentUpgrade: policy } },
-        installedVersion,
-        stopBefore,
-        requested !== null
-      ))
+  const reminder = await (
+    stopBefore === null && initialAssessment
+      ? initialAssessment
+      : assessUpgrade(
+          directory,
+          { ...config, experimental: { agentUpgrade: policy } },
+          installedVersion,
+          stopBefore,
+          requested !== null
+        )
+  ).catch((error) => {
+    if (agent) {
+      telemetry?.record(policyEvent)
+    }
+    throw error
+  })
   if (!reminder || signal?.aborted) {
+    if (agent) {
+      telemetry?.record(policyEvent)
+    }
     return
   }
 
@@ -616,7 +630,8 @@ export async function nudgeUpgrade(
       reminder,
       nudgeId,
       agent,
-      telemetry
+      telemetry,
+      policyEvent
     )
   } else if (signal) {
     // Count a human nudge only after the menu renders, including its selected action.

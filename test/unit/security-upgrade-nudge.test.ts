@@ -19,6 +19,7 @@ import { getUpgradeAssessment } from 'next/dist/lib/upgrade/prepare-upgrade'
 import { warn } from 'next/dist/build/output/log'
 import { spawnNextUpgrade } from 'next/dist/cli/next-upgrade'
 import { defaultConfig } from 'next/dist/server/config-shared'
+import { recursiveDeleteSyncWithAsyncRetries } from 'next/dist/lib/recursive-delete'
 
 jest.mock('next/dist/cli/next-upgrade', () => ({
   spawnNextUpgrade: jest.fn(),
@@ -159,7 +160,7 @@ afterEach(async () => {
 })
 
 // Exercise storage with real files so unrelated queued events cannot enter a nudge batch.
-it('detaches only the supplied nudge event', async () => {
+it('preserves isolated detached batches during build cleanup', async () => {
   const { Telemetry: ActualTelemetry } = jest.requireActual(
     '../../packages/next/src/telemetry/storage'
   )
@@ -177,7 +178,16 @@ it('detaches only the supplied nudge event', async () => {
     const nudge = { eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN', payload: {} }
     await telemetry.record(unrelated, true)
     telemetry.flushDetached('dev', directory, join(directory, '.next'), [nudge])
-    const eventsFile = join(directory, '.next', spawn.mock.calls[0][1]![3])
+    const eventsFile = join(
+      directory,
+      '.next',
+      'cache',
+      spawn.mock.calls[0][1]![3]
+    )
+    await recursiveDeleteSyncWithAsyncRetries(
+      join(directory, '.next'),
+      new Set(['cache', 'dev', 'diagnostics', 'lock', 'trace'])
+    )
     expect(JSON.parse(await readFile(eventsFile, 'utf8'))).toEqual([nudge])
 
     // The unrelated event remains available for the command's own shutdown flush.
@@ -185,6 +195,7 @@ it('detaches only the supplied nudge event', async () => {
     const shutdownEventsFile = join(
       directory,
       '.next',
+      'cache',
       spawn.mock.calls[1][1]![3]
     )
     expect(JSON.parse(await readFile(shutdownEventsFile, 'utf8'))).toEqual([
@@ -847,27 +858,24 @@ describe('latest upgrade nudge', () => {
     ).toHaveLength(2)
     expect(
       telemetry.record.mock.calls.map(([event]) => event.eventName)
-    ).toEqual([
-      'NEXT_AI_UPGRADE_POLICY_OBSERVED',
-      'NEXT_AI_UPGRADE_POLICY_OBSERVED',
-    ])
+    ).toEqual(['NEXT_AI_UPGRADE_POLICY_OBSERVED'])
     expect(telemetry.flushDetached).toHaveBeenCalledWith(
       'dev',
       directory,
       join(directory, '.next'),
-      [expect.objectContaining({ eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN' })]
+      [
+        expect.objectContaining({
+          eventName: 'NEXT_AI_UPGRADE_POLICY_OBSERVED',
+        }),
+        expect.objectContaining({ eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN' }),
+      ]
     )
   })
 
   it('does not wait for telemetry delivery before stopping an agent command', async () => {
     mockUpgrade('17.0.0')
     const { telemetry } = collectTelemetryEvents()
-    telemetry.record.mockImplementationOnce(async () => ({
-      isFulfilled: true,
-      isRejected: false,
-      value: undefined,
-    }))
-    telemetry.record.mockImplementationOnce(() => new Promise<never>(() => {}))
+    telemetry.record.mockImplementation(() => new Promise<never>(() => {}))
 
     await expect(
       nudgeUpgrade(directory, config('latest'), 'build', null, null, {
@@ -876,7 +884,36 @@ describe('latest upgrade nudge', () => {
       })
     ).rejects.toMatchObject({ name: 'UpgradeNudgeError' })
     expect(telemetry.flushDetached).toHaveBeenCalledTimes(1)
+    expect(telemetry.record).toHaveBeenCalledTimes(0)
   })
+
+  it.each([false, true])(
+    'records agent policy without a nudge when assessment fails: %s',
+    async (fails) => {
+      const { events, telemetry } = collectTelemetryEvents()
+      const assessment = fails
+        ? Promise.reject(new Error('Assessment failed'))
+        : Promise.resolve(null)
+
+      const pending = nudgeUpgrade(
+        directory,
+        config('security'),
+        'dev',
+        null,
+        assessment,
+        { telemetry, onNudgeId: null }
+      )
+      if (fails) {
+        await expect(pending).rejects.toThrow('Assessment failed')
+      } else {
+        await expect(pending).resolves.toBeUndefined()
+      }
+      expect(events.map(({ eventName }) => eventName)).toEqual([
+        'NEXT_AI_UPGRADE_POLICY_OBSERVED',
+      ])
+      expect(telemetry.flushDetached).toHaveBeenCalledTimes(0)
+    }
+  )
 
   it.each(['latest', 'experimental-future'] as const)(
     'does not offer an unsafe %s target or fall through to Future adoption',

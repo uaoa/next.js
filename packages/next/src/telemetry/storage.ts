@@ -259,11 +259,13 @@ export class Telemetry {
       return
     }
 
-    fs.mkdirSync(this.distDir, { recursive: true })
+    // Builds preserve cache while cleaning distDir, so detached batches survive cleanup.
+    const eventsDirectory = path.join(this.distDir, 'cache')
+    fs.mkdirSync(eventsDirectory, { recursive: true })
     // Each flush owns its file so a later shutdown flush cannot replace a nudge batch.
     const eventsFile = `_events_${process.pid}_${randomBytes(8).toString('hex')}.json`
     fs.writeFileSync(
-      path.join(this.distDir, eventsFile),
+      path.join(eventsDirectory, eventsFile),
       JSON.stringify(allEvents)
     )
 
