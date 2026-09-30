@@ -631,6 +631,7 @@ export function middleware(request: NextRequest) {
 ### Installation fails after upgrading to React 19
 
 - [ ] If another package's peer dependencies reject React 19, revert `react`, `react-dom`, and their types to the previous versions, provided the target Next.js version and router support them.
+- [ ] Restore or remove React type overrides or resolutions added by the upgrade in `package.json` or `pnpm-workspace.yaml`.
 - [ ] Retry installation and run the app's checks.
 
 ### Installation fails after upgrading to ESLint 9
