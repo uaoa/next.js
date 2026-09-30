@@ -1,5 +1,5 @@
-import { execFileSync } from 'child_process'
-import { mkdir, mkdtemp, rm } from 'fs/promises'
+import { execFileSync, spawnSync } from 'child_process'
+import { mkdir, mkdtemp, readFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { processEnv, resetEnv, updateInitialEnv } from '@next/env'
@@ -14,6 +14,7 @@ import {
 import { promptUpgrade } from 'next/dist/lib/upgrade/prompt'
 import Conf from 'next/dist/compiled/conf'
 import { getAgentName } from 'next/dist/telemetry/agent-name'
+import type { Telemetry } from 'next/dist/telemetry/storage'
 import { getUpgradeAssessment } from 'next/dist/lib/upgrade/prepare-upgrade'
 import { warn } from 'next/dist/build/output/log'
 import { spawnNextUpgrade } from 'next/dist/cli/next-upgrade'
@@ -110,6 +111,28 @@ it('defaults agentUpgrade to the security policy', () => {
   expect(context.experimental.agentUpgrade).toBe('security')
 })
 
+function collectTelemetryEvents() {
+  const events: Array<{
+    eventName: string
+    payload: Record<string, unknown>
+  }> = []
+  const telemetry = {
+    isEnabled: true,
+    record: jest.fn(async (event: (typeof events)[number]) => {
+      events.push(event)
+      return { isFulfilled: true, isRejected: false, value: undefined }
+    }),
+    flush: jest.fn(async () => []),
+    flushDetached: jest.fn((_mode, _dir, _distDir, detachedEvents) => {
+      events.push(...detachedEvents)
+    }),
+  }
+  return {
+    events,
+    telemetry: telemetry as unknown as Telemetry & typeof telemetry,
+  }
+}
+
 beforeEach(async () => {
   delete process.env.__NEXT_AGENT_UPGRADE
   process.env.__NEXT_VERSION = '16.4.0'
@@ -131,11 +154,78 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
+// Exercise storage with real files so unrelated queued events cannot enter a nudge batch.
+it('detaches only the supplied nudge event', async () => {
+  const { Telemetry: ActualTelemetry } = jest.requireActual(
+    '../../packages/next/src/telemetry/storage'
+  )
+  const originalDebug = process.env.NEXT_TELEMETRY_DEBUG
+  process.env.NEXT_TELEMETRY_DEBUG = '1'
+  const spawn = jest
+    .spyOn(require('child_process'), 'spawnSync')
+    .mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>)
+  try {
+    const telemetry = new ActualTelemetry({
+      distDir: join(directory, '.next'),
+      skipNotify: true,
+    })
+    const unrelated = { eventName: 'UNRELATED', payload: {} }
+    const nudge = { eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN', payload: {} }
+    await telemetry.record(unrelated, true)
+    telemetry.flushDetached('dev', directory, join(directory, '.next'), [nudge])
+    const eventsFile = join(directory, '.next', spawn.mock.calls[0][1]![3])
+    expect(JSON.parse(await readFile(eventsFile, 'utf8'))).toEqual([nudge])
+
+    // The unrelated event remains available for the command's own shutdown flush.
+    telemetry.flushDetached('dev', directory, join(directory, '.next'), null)
+    const shutdownEventsFile = join(
+      directory,
+      '.next',
+      spawn.mock.calls[1][1]![3]
+    )
+    expect(JSON.parse(await readFile(shutdownEventsFile, 'utf8'))).toEqual([
+      unrelated,
+    ])
+    expect(JSON.parse(await readFile(eventsFile, 'utf8'))).toEqual([nudge])
+  } finally {
+    spawn.mockRestore()
+    if (originalDebug === undefined) {
+      delete process.env.NEXT_TELEMETRY_DEBUG
+    } else {
+      process.env.NEXT_TELEMETRY_DEBUG = originalDebug
+    }
+  }
+})
+
+it('derives project identity from the requested directory across repositories', async () => {
+  const { getRawProjectId } = jest.requireActual(
+    '../../packages/next/src/telemetry/project-id'
+  )
+  const repositories = [join(directory, 'first'), join(directory, 'second')]
+  for (const [index, repository] of repositories.entries()) {
+    execFileSync('git', ['init', repository], { stdio: 'ignore' })
+    execFileSync('git', [
+      '-C',
+      repository,
+      'remote',
+      'add',
+      'origin',
+      `https://example.com/project-${index}.git`,
+    ])
+  }
+  expect(await getRawProjectId(repositories[0])).toBe(
+    'https://example.com/project-0.git'
+  )
+  expect(await getRawProjectId(repositories[1])).toBe(
+    'https://example.com/project-1.git'
+  )
+})
+
 describe('security upgrade nudge', () => {
   const originalNextVersion = process.env.__NEXT_VERSION
 
   const run = (command: 'dev' | 'build' = 'build') =>
-    nudgeUpgrade(directory, config('security'), command)
+    nudgeUpgrade(directory, config('security'), command, null, null, null)
 
   beforeEach(() => {
     jest.resetAllMocks()
@@ -169,7 +259,7 @@ describe('security upgrade nudge', () => {
       name: 'SecurityFatalError',
       exitCode: 1,
       message: expect.stringMatching(
-        /affected by a known security vulnerability[\s\S]*\*\*We strongly recommend you upgrade Next\.js\.\*\*[\s\S]*upgrade recommendation\. Retry the same command to continue the original task\.[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*ask the user once:[\s\S]*in a separate Git worktree\?[\s\S]*Use their worktree choice and continue in this agent session[\s\S]*Run this command from this app's directory:[\s\S]*```\nnext upgrade --ai=(?:security|latest|experimental-future)\n```/
+        /affected by a known security vulnerability[\s\S]*\*\*We strongly recommend you upgrade Next\.js\.\*\*[\s\S]*upgrade recommendation\. Retry the same command to continue the original task\.[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*ask the user once:[\s\S]*in a separate Git worktree\?[\s\S]*Use their worktree choice and continue in this agent session[\s\S]*Run this command from this app's directory:[\s\S]*next upgrade --ai=(?:security|latest|experimental-future)/
       ),
     })
     expect(warn).not.toHaveBeenCalled()
@@ -215,7 +305,7 @@ describe('security upgrade nudge', () => {
     const assessment = assessUpgrade(directory, config('security'), '13.0.0')
 
     await expect(
-      nudgeUpgrade(directory, config('security'), 'dev', null, assessment)
+      nudgeUpgrade(directory, config('security'), 'dev', null, assessment, null)
     ).resolves.toBeUndefined()
 
     expect(getUpgradeAssessment).toHaveBeenCalledTimes(1)
@@ -323,10 +413,10 @@ describe('security upgrade nudge', () => {
       process.send = send as unknown as typeof process.send
 
       await expect(
-        nudgeUpgrade(directory, config('security'), 'dev', null, reminder)
+        nudgeUpgrade(directory, config('security'), 'dev', null, reminder, null)
       ).rejects.toMatchObject({ name: 'SecurityFatalError' })
       await expect(
-        nudgeUpgrade(directory, config('security'), 'dev', null, reminder)
+        nudgeUpgrade(directory, config('security'), 'dev', null, reminder, null)
       ).resolves.toBeUndefined()
 
       const message = send.mock.calls[0]?.[0] as {
@@ -467,7 +557,7 @@ describe('latest upgrade nudge', () => {
       process.env.__NEXT_VERSION = '17.2.0-canary.4'
       mockUpgrade('17.3.0-canary.1')
       await expect(
-        nudgeUpgrade(directory, config(policy), 'build')
+        nudgeUpgrade(directory, config(policy), 'build', null, null, null)
       ).rejects.toMatchObject({
         name: 'UpgradeNudgeError',
         message: expect.stringContaining(
@@ -475,7 +565,7 @@ describe('latest upgrade nudge', () => {
         ),
       })
       await expect(
-        nudgeUpgrade(directory, config(policy), 'build')
+        nudgeUpgrade(directory, config(policy), 'build', null, null, null)
       ).resolves.toBeUndefined()
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining(
@@ -491,7 +581,7 @@ describe('latest upgrade nudge', () => {
       process.env.__NEXT_VERSION = `17.2.0-${channel}.1`
       mockUpgrade('17.2.0')
       await expect(
-        nudgeUpgrade(directory, config('latest'), 'build')
+        nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
       ).rejects.toMatchObject({
         name: 'UpgradeNudgeError',
         message: expect.stringContaining(
@@ -510,16 +600,16 @@ describe('latest upgrade nudge', () => {
     mockUpgrade('17.0.0')
 
     await expect(
-      nudgeUpgrade(directory, config('latest'), 'build')
+      nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
     ).rejects.toMatchObject({
       name: 'UpgradeNudgeError',
       exitCode: 1,
       message: expect.stringMatching(
-        /Next\.js 17\.0\.0 is available\.[\s\S]*\*\*We recommend you upgrade Next\.js\.\*\*[\s\S]*upgrade recommendation\. Retry the same command to continue the original task\.[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*ask the user once:[\s\S]*in a separate Git worktree\?[\s\S]*Use their worktree choice and continue in this agent session[\s\S]*Run this command from this app's directory:[\s\S]*```\nnext upgrade --ai=(?:security|latest|experimental-future)\n```[\s\S]*registry\.npmjs\.org/
+        /Next\.js 17\.0\.0 is available\.[\s\S]*\*\*We recommend you upgrade Next\.js\.\*\*[\s\S]*upgrade recommendation\. Retry the same command to continue the original task\.[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*ask the user once:[\s\S]*in a separate Git worktree\?[\s\S]*Use their worktree choice and continue in this agent session[\s\S]*Run this command from this app's directory:[\s\S]*next upgrade --ai=(?:security|latest|experimental-future)[\s\S]*registry\.npmjs\.org/
       ),
     })
     await expect(
-      nudgeUpgrade(directory, config('latest'), 'build')
+      nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
     ).resolves.toBeUndefined()
 
     expect(getUpgradeAssessment).toHaveBeenCalledTimes(2)
@@ -528,6 +618,136 @@ describe('latest upgrade nudge', () => {
         /Next\.js 17\.0\.0 is available\.[\s\S]*continuing after the upgrade reminder[\s\S]*registry\.npmjs\.org/
       )
     )
+  })
+
+  it.each(['linux', 'win32'] as const)(
+    'shows an upgrade command for %s shells',
+    async (platform) => {
+      mockUpgrade('17.0.0')
+      const originalPlatform = Object.getOwnPropertyDescriptor(
+        process,
+        'platform'
+      )!
+      Object.defineProperty(process, 'platform', { value: platform })
+      try {
+        const error = await nudgeUpgrade(
+          directory,
+          config('latest'),
+          'build',
+          null,
+          null,
+          null
+        ).catch((reason) => reason)
+        expect(error).toMatchObject({ name: 'UpgradeNudgeError' })
+        const message = (error as Error).message
+        expect(message).not.toContain('--ai-nudge-id')
+        if (platform === 'win32') {
+          const powershellId = message.match(
+            /\$env:__NEXT_AI_UPGRADE_NUDGE_ID = '([0-9a-f-]{36})'/
+          )?.[1]
+          const cmdId = message.match(
+            /cmd \/C "set __NEXT_AI_UPGRADE_NUDGE_ID=([0-9a-f-]{36})&& next upgrade --ai=latest"/
+          )?.[1]
+          expect(message).toContain(
+            '$previousNudgeId = $env:__NEXT_AI_UPGRADE_NUDGE_ID'
+          )
+          expect(message).toContain('} finally {')
+          expect(message).toContain('if ($LASTEXITCODE -ne 0) {')
+          expect(message).toContain(
+            'throw "next upgrade exited with code $LASTEXITCODE"'
+          )
+          expect(message.indexOf('next upgrade --ai=latest')).toBeLessThan(
+            message.indexOf('if ($LASTEXITCODE -ne 0) {')
+          )
+          expect(message.indexOf('if ($LASTEXITCODE -ne 0) {')).toBeLessThan(
+            message.indexOf('} finally {')
+          )
+          expect(message).toContain(
+            'Remove-Item Env:__NEXT_AI_UPGRADE_NUDGE_ID -ErrorAction SilentlyContinue'
+          )
+          expect(message).toContain(
+            '$env:__NEXT_AI_UPGRADE_NUDGE_ID = $previousNudgeId'
+          )
+          expect(powershellId).toMatch(/^[0-9a-f-]{36}$/)
+          expect(cmdId).toBe(powershellId)
+        } else {
+          expect(message).toMatch(
+            /```\n__NEXT_AI_UPGRADE_NUDGE_ID=[0-9a-f-]{36} next upgrade --ai=latest\n```/
+          )
+        }
+      } finally {
+        Object.defineProperty(process, 'platform', originalPlatform)
+      }
+    }
+  )
+
+  it('records the policy and full agent nudge but not its retry warning', async () => {
+    mockUpgrade('17.0.0')
+    const { events, telemetry } = collectTelemetryEvents()
+
+    await expect(
+      nudgeUpgrade(directory, config('latest'), 'build', null, null, {
+        telemetry,
+        onNudgeId: null,
+      })
+    ).rejects.toMatchObject({ name: 'UpgradeNudgeError' })
+    await nudgeUpgrade(directory, config('latest'), 'build', null, null, {
+      telemetry,
+      onNudgeId: null,
+    })
+
+    expect(
+      events.filter(
+        (event) => event.eventName === 'NEXT_AI_UPGRADE_NUDGE_SHOWN'
+      )
+    ).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          recipient: 'agent',
+          agentProduct: 'codex',
+          policy: 'latest',
+          nudgeKind: 'latest',
+          sourceCommand: 'build',
+          nudgeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        }),
+      }),
+    ])
+    expect(
+      events.filter(
+        (event) => event.eventName === 'NEXT_AI_UPGRADE_POLICY_OBSERVED'
+      )
+    ).toHaveLength(2)
+    expect(
+      telemetry.record.mock.calls.map(([event]) => event.eventName)
+    ).toEqual([
+      'NEXT_AI_UPGRADE_POLICY_OBSERVED',
+      'NEXT_AI_UPGRADE_POLICY_OBSERVED',
+    ])
+    expect(telemetry.flushDetached).toHaveBeenCalledWith(
+      'dev',
+      directory,
+      join(directory, '.next'),
+      [expect.objectContaining({ eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN' })]
+    )
+  })
+
+  it('does not wait for telemetry delivery before stopping an agent command', async () => {
+    mockUpgrade('17.0.0')
+    const { telemetry } = collectTelemetryEvents()
+    telemetry.record.mockImplementationOnce(async () => ({
+      isFulfilled: true,
+      isRejected: false,
+      value: undefined,
+    }))
+    telemetry.record.mockImplementationOnce(() => new Promise<never>(() => {}))
+
+    await expect(
+      nudgeUpgrade(directory, config('latest'), 'build', null, null, {
+        telemetry,
+        onNudgeId: null,
+      })
+    ).rejects.toMatchObject({ name: 'UpgradeNudgeError' })
+    expect(telemetry.flushDetached).toHaveBeenCalledTimes(1)
   })
 
   it.each(['latest', 'experimental-future'] as const)(
@@ -542,7 +762,10 @@ describe('latest upgrade nudge', () => {
         nudgeUpgrade(
           directory,
           config(policy, { cacheComponents: false }),
-          'build'
+          'build',
+          null,
+          null,
+          null
         )
       ).resolves.toBeUndefined()
       expect(warn).toHaveBeenCalledTimes(0)
@@ -551,7 +774,7 @@ describe('latest upgrade nudge', () => {
   )
 
   it('stays silent when there is no newer stable release', async () => {
-    await nudgeUpgrade(directory, config('latest'), 'build')
+    await nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
 
     expect(getUpgradeAssessment).toHaveBeenCalledTimes(1)
     expect(warn).not.toHaveBeenCalled()
@@ -560,7 +783,7 @@ describe('latest upgrade nudge', () => {
   it('does not look up releases or log outside an agent', async () => {
     jest.mocked(getAgentName).mockResolvedValue(null)
 
-    await nudgeUpgrade(directory, config('latest'), 'build')
+    await nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
 
     expect(getUpgradeAssessment).not.toHaveBeenCalled()
     expect(warn).not.toHaveBeenCalled()
@@ -574,7 +797,7 @@ describe('latest upgrade nudge', () => {
     })
 
     await expect(
-      nudgeUpgrade(directory, config('latest'), 'build')
+      nudgeUpgrade(directory, config('latest'), 'build', null, null, null)
     ).resolves.toBeUndefined()
 
     expect(warn).not.toHaveBeenCalled()
@@ -603,13 +826,18 @@ describe('composed latest nudge', () => {
         reference: 'https://api.github.com/advisories?affects=next%4015.0.0',
       })
 
-      const nudge = nudgeUpgrade(directory, config(policy), 'build')
+      const nudge = nudgeUpgrade(
+        directory,
+        config(policy),
+        'build',
+        null,
+        null,
+        null
+      )
       await expect(nudge).rejects.toMatchObject({
         name: 'SecurityFatalError',
         exitCode: 1,
-        message: expect.stringContaining(
-          `\`\`\`\nnext upgrade --ai=${policy}\n\`\`\``
-        ),
+        message: expect.stringContaining(`next upgrade --ai=${policy}`),
       })
       await expect(nudge).rejects.toMatchObject({
         message: expect.stringContaining(
@@ -679,7 +907,10 @@ describe('composed future nudge', () => {
       nudgeUpgrade(
         directory,
         config('experimental-future', { cacheComponents: false }),
-        'build'
+        'build',
+        null,
+        null,
+        null
       )
     ).rejects.toMatchObject({
       name: 'UpgradeNudgeError',
@@ -735,12 +966,15 @@ describe('composed future nudge', () => {
       nudgeUpgrade(
         directory,
         config('experimental-future', { cacheComponents: false }),
-        'build'
+        'build',
+        null,
+        null,
+        null
       )
     ).rejects.toMatchObject({
       name: 'UpgradeNudgeError',
       message: expect.stringMatching(
-        /Next\.js 17\.0\.0 is available[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*next upgrade --ai=(?:security|latest|experimental-future)\n```/
+        /Next\.js 17\.0\.0 is available[\s\S]*include this upgrade recommendation even if the retry succeeds\.[\s\S]*next upgrade --ai=(?:security|latest|experimental-future)/
       ),
     })
   })
@@ -767,7 +1001,7 @@ describe('human upgrade nudge', () => {
       | 'latest'
       | 'experimental-future' = 'experimental-future',
     signal = new AbortController().signal
-  ) => nudgeUpgrade(directory, config(policy), 'build', signal)
+  ) => nudgeUpgrade(directory, config(policy), 'build', signal, null, null)
 
   beforeEach(() => {
     jest.resetAllMocks()
@@ -783,6 +1017,46 @@ describe('human upgrade nudge', () => {
     jest.mocked(getAgentName).mockResolvedValue(null)
     jest.mocked(getUpgradeAssessment).mockResolvedValue(securityAssessment)
     jest.mocked(promptUpgrade).mockResolvedValue('skip')
+  })
+
+  it('links a rendered human nudge to its selected action', async () => {
+    const { events, telemetry } = collectTelemetryEvents()
+    let selectedNudgeId: string | null = null
+    jest
+      .mocked(promptUpgrade)
+      .mockImplementationOnce(
+        async (_message, _signal, _canUpdate, onShown) => {
+          onShown?.()
+          return 'update'
+        }
+      )
+
+    await expect(
+      nudgeUpgrade(
+        directory,
+        config('security'),
+        'build',
+        new AbortController().signal,
+        null,
+        {
+          telemetry,
+          onNudgeId(id) {
+            selectedNudgeId = id
+          },
+        }
+      )
+    ).resolves.toBe('update')
+
+    expect(events.map((event) => event.eventName)).toEqual([
+      'NEXT_AI_UPGRADE_POLICY_OBSERVED',
+      'NEXT_AI_UPGRADE_NUDGE_SHOWN',
+      'NEXT_AI_UPGRADE_NUDGE_ACTION',
+    ])
+    expect(events[1].payload.nudgeId).toBe(selectedNudgeId)
+    expect(events[2].payload).toMatchObject({
+      nudgeId: selectedNudgeId,
+      action: 'update',
+    })
   })
 
   afterEach(() => {
@@ -813,7 +1087,8 @@ describe('human upgrade nudge', () => {
         config('security'),
         'dev',
         new AbortController().signal,
-        assessment
+        assessment,
+        null
       )
     ).resolves.toBe('skip')
 
@@ -857,7 +1132,8 @@ describe('human upgrade nudge', () => {
       expect(promptUpgrade).toHaveBeenCalledWith(
         message,
         expect.any(AbortSignal),
-        true
+        true,
+        null
       )
       jest.mocked(getAgentName).mockResolvedValue('codex')
       await expect(run(policy)).rejects.toMatchObject({
@@ -872,12 +1148,15 @@ describe('human upgrade nudge', () => {
       directory,
       config('experimental-future', { cacheComponents: true }),
       'build',
-      new AbortController().signal
+      new AbortController().signal,
+      null,
+      null
     )
     expect(promptUpgrade).toHaveBeenCalledWith(
       'Next.js Future Default upgrade available: 16.4.0 -> 17.0.0',
       expect.any(AbortSignal),
-      true
+      true,
+      null
     )
   })
 
@@ -889,7 +1168,8 @@ describe('human upgrade nudge', () => {
       expect(promptUpgrade).toHaveBeenCalledWith(
         '⚠ Installed Next.js version 16.4.0 is affected by a known security vulnerability.\n\nNext.js security version upgrade available: 16.4.0 -> 17.0.0',
         expect.any(AbortSignal),
-        true
+        true,
+        null
       )
       await expect(run()).resolves.toBe(action)
       expect(promptUpgrade).toHaveBeenCalledTimes(2)
@@ -908,7 +1188,14 @@ describe('human upgrade nudge', () => {
         const context = getUpgradeContext(original)
         expect(context.experimental.agentUpgrade).toBe(policy)
         await expect(
-          nudgeUpgrade(directory, context, 'dev', new AbortController().signal)
+          nudgeUpgrade(
+            directory,
+            context,
+            'dev',
+            new AbortController().signal,
+            null,
+            null
+          )
         ).resolves.toBeUndefined()
       }
       expect(promptUpgrade).not.toHaveBeenCalled()
@@ -935,12 +1222,16 @@ describe('human upgrade nudge', () => {
         expect(process.env.__NEXT_AGENT_UPGRADE).toBeUndefined()
         expect(process.env.__NEXT_VERSION).toBe('16.4.0-preview-test')
       })
-      await runUpgrade(directory, policy)
-      expect(spawnNextUpgrade).toHaveBeenCalledWith(directory, {
-        revision: 'latest',
-        verbose: false,
-        ai: policy,
-      })
+      await runUpgrade(directory, policy, null)
+      expect(spawnNextUpgrade).toHaveBeenCalledWith(
+        directory,
+        {
+          revision: 'latest',
+          verbose: false,
+          ai: policy,
+        },
+        null
+      )
     }
   )
 
@@ -984,7 +1275,9 @@ describe('human upgrade nudge', () => {
       directory,
       config(false),
       'dev',
-      new AbortController().signal
+      new AbortController().signal,
+      null,
+      null
     )
     const message = jest.mocked(promptUpgrade).mock.calls[0][0]
     expect(message).toContain(
@@ -994,7 +1287,7 @@ describe('human upgrade nudge', () => {
     expect(getUpgradeAssessment).toHaveBeenCalledWith('16.4.0', 'latest', false)
     jest.mocked(getAgentName).mockResolvedValue('codex')
     await expect(
-      nudgeUpgrade(directory, config(false), 'dev')
+      nudgeUpgrade(directory, config(false), 'dev', null, null, null)
     ).rejects.toMatchObject({
       message: expect.stringContaining('next upgrade --ai=latest'),
     })
@@ -1008,7 +1301,9 @@ describe('human upgrade nudge', () => {
       directory,
       context,
       'build',
-      new AbortController().signal
+      new AbortController().signal,
+      null,
+      null
     )
     expect(promptUpgrade).not.toHaveBeenCalled()
     await expect(run()).resolves.toBe('skip')
@@ -1045,7 +1340,9 @@ describe('human upgrade nudge', () => {
         join(directory, 'app'),
         config('experimental-future'),
         'build',
-        new AbortController().signal
+        new AbortController().signal,
+        null,
+        null
       )
     ).resolves.toBe('skip')
   })
@@ -1089,7 +1386,9 @@ describe('human upgrade nudge', () => {
           path,
           config('experimental-future'),
           'build',
-          new AbortController().signal
+          new AbortController().signal,
+          null,
+          null
         )
       jest.mocked(promptUpgrade).mockResolvedValue('dismiss')
       await expect(offer(app)).resolves.toBe('dismiss')
@@ -1159,7 +1458,8 @@ describe('human upgrade nudge', () => {
         'Next.js Future Default upgrade available: 16.4.0 -> 17.0.0'
       ),
       expect.any(AbortSignal),
-      true
+      true,
+      null
     )
   })
 

@@ -49,6 +49,9 @@ function getStorageDirectory(distDir: string): string | undefined {
 }
 
 export class Telemetry {
+  // Explicit upgrade paths and delegated runs must use the same project identity.
+  projectDir = process.cwd()
+
   readonly sessionId: string
 
   private conf: Conf<any> | null
@@ -175,7 +178,7 @@ export class Telemetry {
   }
 
   private async getProjectId(): Promise<string> {
-    this.loadProjectId = this.loadProjectId || getRawProjectId()
+    this.loadProjectId = this.loadProjectId || getRawProjectId(this.projectDir)
     return this.oneWayHash(await this.loadProjectId)
   }
 
@@ -231,17 +234,25 @@ export class Telemetry {
   // writes current events to disk and spawns separate
   // detached process to submit the records without blocking
   // the main process from exiting
-  flushDetached = (mode: 'dev', dir: string) => {
-    const allEvents: TelemetryEvent[] = []
+  flushDetached = (
+    mode: 'dev',
+    dir: string,
+    distDir: string | null,
+    events: TelemetryEvent[] | null
+  ) => {
+    // Nudges detach only their own events; shutdown flushes the full queue.
+    const allEvents: TelemetryEvent[] = events ?? []
 
-    this.queue.forEach((item: any) => {
-      try {
-        item._controller?.abort()
-        allEvents.push(...item._events)
-      } catch (_) {
-        // if we fail to abort ignore this event
-      }
-    })
+    if (events === null) {
+      this.queue.forEach((item: any) => {
+        try {
+          item._controller?.abort()
+          allEvents.push(...item._events)
+        } catch (_) {
+          // if we fail to abort ignore this event
+        }
+      })
+    }
 
     if (allEvents.length === 0) {
       // No events to flush
@@ -249,8 +260,8 @@ export class Telemetry {
     }
 
     fs.mkdirSync(this.distDir, { recursive: true })
-    // Use unique filename per process to avoid race conditions between parent/child
-    const eventsFile = `_events_${process.pid}.json`
+    // Each flush owns its file so a later shutdown flush cannot replace a nudge batch.
+    const eventsFile = `_events_${process.pid}_${randomBytes(8).toString('hex')}.json`
     fs.writeFileSync(
       path.join(this.distDir, eventsFile),
       JSON.stringify(allEvents)
@@ -269,7 +280,13 @@ export class Telemetry {
 
     spawn(
       process.execPath,
-      [require.resolve('./detached-flush'), mode, dir, eventsFile],
+      [
+        require.resolve('./detached-flush'),
+        mode,
+        dir,
+        eventsFile,
+        ...(distDir ? [distDir] : []),
+      ],
       {
         detached: !this.NEXT_TELEMETRY_DEBUG,
         windowsHide: true,

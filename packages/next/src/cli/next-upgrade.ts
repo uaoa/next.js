@@ -1,7 +1,8 @@
 import { spawn } from 'child_process'
+import { randomUUID } from 'crypto'
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
-import { dirname, join } from 'path'
+import { dirname, join, resolve as resolvePath } from 'path'
 import { major, prerelease, valid } from 'next/dist/compiled/semver'
 import * as Log from '../build/output/log'
 import createSpinner from '../build/spinner'
@@ -12,6 +13,13 @@ import { interopDefault } from '../lib/interop-default'
 import { dim } from '../lib/picocolors'
 import type { UpgradeDocument } from '../lib/upgrade/future-defaults'
 import { runChildProcess } from '../lib/upgrade/run-child-process'
+import { getAgentName } from '../telemetry/agent-name'
+import {
+  eventAIUpgradeRunStarted,
+  type AIUpgradeOrigin,
+  type AIUpgradePolicy,
+} from '../telemetry/events/ai-upgrade'
+import { Telemetry } from '../telemetry/storage'
 import loadConfig from '../server/config'
 import { normalizeConfig } from '../server/config-shared'
 import { PHASE_PRODUCTION_BUILD } from '../shared/lib/constants'
@@ -21,6 +29,18 @@ type NextUpgradeOptions = {
   verbose: boolean
   ai: boolean | string | undefined
 }
+
+// Carry one run's attribution through delegation to the current canary CLI.
+type UpgradeRunContext = {
+  runId: string
+  nudgeId: string | null
+  origin: AIUpgradeOrigin
+  agentProduct: string | null
+  requestedPolicy: AIUpgradePolicy | null
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 const CODEMOD_COMMAND_PLACEHOLDER = '<codemod-command>'
 const SKILLS_CLI_VERSION = '1.5.26'
@@ -176,12 +196,77 @@ async function resolveCanaryVersion(): Promise<string> {
 
 export async function spawnNextUpgrade(
   directory: string | undefined,
-  options: NextUpgradeOptions
+  options: NextUpgradeOptions,
+  nudgeSource: { id: string; recipient: 'human' | 'agent' } | null
 ) {
-  const baseDir = getProjectDir(directory)
+  let baseDir = resolvePath(directory || '.')
 
   if (options.ai) {
+    // Count AI invocations before validating the app directory or preparing guides.
+    const telemetry = new Telemetry({
+      distDir: join(baseDir, '.next'),
+      skipNotify: true,
+    })
+    telemetry.projectDir = baseDir
+    let context: UpgradeRunContext | null = null
     try {
+      // Consume correlation data so subsequent agent commands cannot inherit it.
+      const inheritedContext = process.env.__NEXT_AI_UPGRADE_RUN_CONTEXT
+      delete process.env.__NEXT_AI_UPGRADE_RUN_CONTEXT
+      const nudgeId = process.env.__NEXT_AI_UPGRADE_NUDGE_ID
+      delete process.env.__NEXT_AI_UPGRADE_NUDGE_ID
+
+      // Invalid attribution still counts as a failed invocation with a fresh run ID.
+      let correlationError: unknown = null
+      const runNudgeSource =
+        nudgeSource ?? (nudgeId ? { id: nudgeId, recipient: 'agent' } : null)
+      if (runNudgeSource && !UUID_PATTERN.test(runNudgeSource.id)) {
+        correlationError = new Error('Invalid upgrade nudge ID.')
+      }
+
+      // Delegation reuses the original run; direct invocations emit a new start.
+      if (inheritedContext) {
+        try {
+          // The invoking CLI creates this context for its pinned child process.
+          const inherited = JSON.parse(inheritedContext) as UpgradeRunContext
+          if (!inherited || !UUID_PATTERN.test(inherited.runId)) {
+            throw new Error('Invalid upgrade run context.')
+          }
+          context = inherited
+        } catch (error) {
+          correlationError = error
+        }
+      }
+      if (!context) {
+        const agentProduct = await getAgentName()
+        const origin: AIUpgradeOrigin =
+          runNudgeSource && !correlationError
+            ? runNudgeSource.recipient === 'agent'
+              ? 'agent_nudge'
+              : 'human_nudge'
+            : agentProduct
+              ? 'agent_manual'
+              : 'human_manual'
+        context = {
+          runId: randomUUID(),
+          nudgeId: correlationError ? null : (runNudgeSource?.id ?? null),
+          origin,
+          agentProduct,
+          requestedPolicy:
+            options.ai === 'security' ||
+            options.ai === 'latest' ||
+            options.ai === 'experimental-future'
+              ? options.ai
+              : null,
+        }
+        await telemetry.record(eventAIUpgradeRunStarted(context))
+      }
+
+      if (correlationError) {
+        throw correlationError
+      }
+
+      baseDir = getProjectDir(directory)
       const expectedVersion = process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
       delete process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
       delete process.env.__NEXT_UPGRADE_USE_CURRENT_CLI
@@ -217,6 +302,8 @@ export async function spawnNextUpgrade(
             stdio: 'inherit',
             env: {
               ...process.env,
+              // The delegated CLI emits the outcome for this invocation's run ID.
+              __NEXT_AI_UPGRADE_RUN_CONTEXT: JSON.stringify(context),
               __NEXT_UPGRADE_EXPECTED_CLI_VERSION: canaryVersion,
               // Older canaries recognize only this recursion guard.
               __NEXT_UPGRADE_USE_CURRENT_CLI: '1',
@@ -453,6 +540,7 @@ export async function spawnNextUpgrade(
       const taskSummary = needsVersionUpdate
         ? `We're upgrading the app in ${JSON.stringify(baseDir)} from Next.js ${result.installedVersion} to ${result.targetVersion} because ${reason}.`
         : `We're adopting the Future Defaults available to the app in ${JSON.stringify(baseDir)}, which already uses Next.js ${result.installedVersion}.`
+
       const prompt = (
         useWorktree: boolean | null
       ) => `Read and follow ${JSON.stringify(sharedGuidePath)} first. Attempt its applicable duplicate checks before changing files. If a check is unavailable, report it and continue. Stop only if you find equivalent work. Then read and follow every applicable instruction in ${JSON.stringify(guidePath)}.
@@ -468,6 +556,7 @@ ${references}`
 
       const { handoffUpgrade } =
         require('../lib/upgrade/harness') as typeof import('../lib/upgrade/harness')
+
       await handoffUpgrade(prompt, baseDir)
     } catch (error) {
       Log.error(
@@ -475,10 +564,15 @@ ${references}`
         error instanceof Error ? error.message : error
       )
       process.exitCode = 1
+    } finally {
+      // Send queued outcomes before this short-lived CLI invocation exits.
+      await telemetry.flush()
     }
 
     return
   }
+
+  baseDir = getProjectDir(directory)
 
   const [upgradeProcessCommand, ...upgradeProcessDefaultArgs] =
     getNpxCommand(baseDir).split(' ')

@@ -11,7 +11,7 @@ import { exec } from 'child_process'
 // with random salt data, making it impossible for us to reverse or try to
 // guess the remote by re-computing hashes.
 
-async function _getProjectIdByGit() {
+async function _getProjectIdByGit(directory: string) {
   try {
     let resolve: (value: Buffer | string) => void, reject: (err: Error) => void
     const promise = new Promise<Buffer | string>((res, rej) => {
@@ -22,6 +22,7 @@ async function _getProjectIdByGit() {
     exec(
       `git config --local --get remote.origin.url`,
       {
+        cwd: directory,
         timeout: 1000,
         windowsHide: true,
       },
@@ -40,8 +41,10 @@ async function _getProjectIdByGit() {
   }
 }
 
-export async function getRawProjectId(): Promise<string> {
+export async function getRawProjectId(directory: string): Promise<string> {
   return (
-    (await _getProjectIdByGit()) || process.env.REPOSITORY_URL || process.cwd()
+    (await _getProjectIdByGit(directory)) ||
+    process.env.REPOSITORY_URL ||
+    directory
   )
 }
