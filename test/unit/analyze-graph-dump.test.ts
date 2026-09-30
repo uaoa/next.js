@@ -395,6 +395,126 @@ describe('NDJSON analyzer graph', () => {
     )
     expect(output).toBe('')
   })
+
+  it('converts overlapping group output indices without changing module identities', async () => {
+    await writeFile(
+      join(snapshot, 'modules.data'),
+      modules(1, { module_index_hash: 'same-index' })
+    )
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route({
+        module_index_hash: 'same-index',
+        chunk_groups: [
+          { id: 1, kind: 'render_dependent', output_file_indices: [0] },
+          {
+            id: 0,
+            kind: 'bootstrap',
+            trigger_module_index: 0,
+            output_file_indices: [0],
+          },
+        ],
+      })
+    )
+    const { output, records } = await dump('/')
+    validateGraphDump(output)
+    const groups = records.filter((record) => record.type === 'group')
+    expect(groups.map((group) => group.id)).toEqual([0, 1, 0, 1])
+    expect(groups[0]).toMatchObject({
+      outputs: ['app.js'],
+      trigger_module_ident: 'app',
+      trigger_join: 'joined',
+    })
+    expect(groups[1]).toMatchObject({
+      outputs: ['app.js'],
+      trigger_join: 'none',
+    })
+    expect(isValidGraphRecord({ ...groups[0], trigger_join: 'maybe' })).toBe(
+      false
+    )
+    expect(() =>
+      validateGraphDump(
+        output +
+          JSON.stringify({ ...groups[0], outputs: ['missing.js'] }) +
+          '\n'
+      )
+    ).toThrow('Unknown group output')
+  })
+
+  it('streams a large graph through a backpressured sink without collecting output', async () => {
+    const count = 8_000
+    const empty = Array.from({ length: count }, () => [] as number[])
+    const input = file(
+      {
+        schema_version: 1,
+        modules: Array.from({ length: count }, (_, i) => ({
+          ident: `m${i}`,
+          path: `src/${i}.js`,
+        })),
+      },
+      {
+        module_dependencies: empty,
+        async_module_dependencies: empty,
+        traced_module_dependencies: empty,
+        module_dependents: empty,
+        async_module_dependents: empty,
+        traced_module_dependents: empty,
+      }
+    )
+    await writeFile(join(snapshot, 'modules.data'), input)
+    let bytes = 0
+    let lines = 0
+    let peak = process.memoryUsage().heapUsed
+    const startHeap = peak
+    const stream = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        bytes += chunk.length
+        lines++
+        peak = Math.max(peak, process.memoryUsage().heapUsed)
+        setImmediate(callback)
+      },
+    })
+    await dumpAnalyzeGraph(root, id, '/', stream)
+    expect(lines).toBeGreaterThan(count)
+    expect(bytes).toBeGreaterThan(input.length)
+    expect(peak - startHeap).toBeLessThan(96 * 1024 * 1024)
+  })
+
+  it('never calls missing membership exact and rejects unverified indexed triggers', async () => {
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route({ output_file_module_coverage: ['exact'] })
+    )
+    expect(
+      (await dump('/')).records.find((record) => record.type === 'output')
+        .coverage
+    ).toBe('unknown')
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route({
+        chunk_groups: [
+          {
+            id: 0,
+            kind: 'bootstrap',
+            trigger_module_index: 0,
+            output_file_indices: [0],
+          },
+        ],
+      })
+    )
+    let output = ''
+    const stream = new Writable({
+      write(chunk, _, callback) {
+        output += chunk
+        callback()
+      },
+    })
+    await expect(dumpAnalyzeGraph(root, id, '/', stream)).rejects.toThrow(
+      'fingerprint mismatch'
+    )
+    expect(output).toBe('')
+  })
 })
 
 describe('analyzer snapshot IDs', () => {

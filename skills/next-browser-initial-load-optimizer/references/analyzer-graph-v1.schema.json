@@ -9,7 +9,8 @@
     { "$ref": "#/$defs/route" },
     { "$ref": "#/$defs/output" },
     { "$ref": "#/$defs/part" },
-    { "$ref": "#/$defs/unjoined" }
+    { "$ref": "#/$defs/unjoined" },
+    { "$ref": "#/$defs/group" }
   ],
   "$defs": {
     "index": { "type": "integer", "minimum": 0 },
@@ -111,7 +112,7 @@
           "required": ["entries", "groups", "load_edges"],
           "properties": {
             "entries": { "enum": ["exact", "unknown"] },
-            "groups": { "const": "unknown" },
+            "groups": { "enum": ["exact", "unknown"] },
             "load_edges": { "const": "unknown" }
           },
           "additionalProperties": true
@@ -184,6 +185,30 @@
         "filename": { "type": "string" },
         "module_ident": { "$ref": "#/$defs/identity" },
         "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "group": {
+      "type": "object",
+      "required": [
+        "type",
+        "route",
+        "route_index",
+        "id",
+        "kind",
+        "trigger_module_ident",
+        "trigger_join",
+        "outputs"
+      ],
+      "properties": {
+        "type": { "const": "group" },
+        "route": { "type": "string" },
+        "route_index": { "$ref": "#/$defs/index" },
+        "id": { "$ref": "#/$defs/index" },
+        "kind": { "type": "string" },
+        "trigger_module_ident": { "type": ["string", "null"] },
+        "trigger_join": { "enum": ["joined", "unjoined", "none"] },
+        "outputs": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": true
     }
