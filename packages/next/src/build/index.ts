@@ -1211,6 +1211,9 @@ export default async function build(
       // Initialize telemetry before installBindings so that SWC load failure
       // events are captured if native bindings fail to load.
       const telemetry = new Telemetry({ distDir })
+      // Keep build nudges and their upgrade runs under the same app identity.
+      telemetry.projectDir = dir
+
       setGlobal('telemetry', telemetry)
 
       // Reuse the loaded config; ordinary builds do not load upgrade tooling.

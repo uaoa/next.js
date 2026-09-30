@@ -59,6 +59,10 @@ jest.mock('next/dist/build/output/log', () => ({
   warn: jest.fn(),
 }))
 
+jest.mock('../../packages/next/src/telemetry/post-telemetry-payload', () => ({
+  postNextTelemetryPayload: jest.fn(),
+}))
+
 jest.mock('../../packages/next/src/server/ci-info', () => ({ isCI: false }))
 jest.mock('../../packages/next/src/lib/upgrade/prompt', () =>
   jest.requireMock('next/dist/lib/upgrade/prompt')
@@ -219,6 +223,58 @@ it('derives project identity from the requested directory across repositories', 
   expect(await getRawProjectId(repositories[1])).toBe(
     'https://example.com/project-1.git'
   )
+
+  // A CLI launched from the first repository must attribute both events to the second app.
+  const { Telemetry: ActualTelemetry } = jest.requireActual(
+    '../../packages/next/src/telemetry/storage'
+  )
+  const transport = jest.requireMock(
+    '../../packages/next/src/telemetry/post-telemetry-payload'
+  )
+  const post = transport.postNextTelemetryPayload
+  post.mockClear()
+  post.mockResolvedValue(undefined)
+  const cwd = jest.spyOn(process, 'cwd').mockReturnValue(repositories[0])
+  const originalDisabled = process.env.NEXT_TELEMETRY_DISABLED
+  const originalPreferencesDirectory = mockPreferencesDirectory
+  mockPreferencesDirectory = join(directory, 'preferences')
+  delete process.env.NEXT_TELEMETRY_DISABLED
+  try {
+    const nudge = new ActualTelemetry({
+      distDir: join(repositories[1], '.next'),
+      skipNotify: true,
+    })
+    nudge.projectDir = repositories[1]
+    await nudge.record({
+      eventName: 'NEXT_AI_UPGRADE_NUDGE_SHOWN',
+      payload: {},
+    })
+
+    const run = new ActualTelemetry({
+      distDir: join(repositories[1], '.next'),
+      skipNotify: true,
+    })
+    run.projectDir = repositories[1]
+    await run.record({ eventName: 'NEXT_AI_UPGRADE_RUN_STARTED', payload: {} })
+
+    expect(post).toHaveBeenCalledTimes(2)
+    const nudgeContext = post.mock.calls[0][0].context
+    const runContext = post.mock.calls[1][0].context
+    expect(nudgeContext.projectId).toBe(runContext.projectId)
+    expect(nudgeContext.anonymousId).toBe(runContext.anonymousId)
+    expect(nudgeContext.projectId).toBe(
+      nudge.oneWayHash('https://example.com/project-1.git')
+    )
+  } finally {
+    post.mockReset()
+    cwd.mockRestore()
+    mockPreferencesDirectory = originalPreferencesDirectory
+    if (originalDisabled === undefined) {
+      delete process.env.NEXT_TELEMETRY_DISABLED
+    } else {
+      process.env.NEXT_TELEMETRY_DISABLED = originalDisabled
+    }
+  }
 })
 
 describe('security upgrade nudge', () => {

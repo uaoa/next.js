@@ -201,6 +201,9 @@ export async function initialize(opts: {
     const telemetry = new Telemetry({
       distDir: path.join(opts.dir, config.distDir),
     })
+    // Use the app identity before the dev worker records policy or nudge events.
+    telemetry.projectDir = opts.dir
+
     traceGlobals.set('telemetry', telemetry)
 
     const { pagesDir, appDir } = findPagesDir(opts.dir)

@@ -271,6 +271,9 @@ const nextDev = async (
       distDir: path.join(dir, context.distDir),
       skipNotify: true,
     })
+    // Attribute the nudge to the app, including when it was passed as a CLI path.
+    telemetry.projectDir = dir
+
     let nudgeId: string | null = null
     let action
 
