@@ -670,6 +670,17 @@ const internal = program
     'Internal debugging commands. Use with caution. Not covered by semver.'
   )
 
+// Agents use the pinned CLI to report completion after the upgrade has changed dependencies.
+internal
+  .command('report-ai-upgrade', { hidden: true })
+  .argument('<run-id>', 'The upgrade run UUID.')
+  .argument('<result>', 'The agent-reported success or failure result.')
+  .action((runId: string, result: string) =>
+    import('../cli/next-upgrade.js').then((mod) =>
+      mod.reportAIUpgradeOutcome(runId, result)
+    )
+  )
+
 internal
   .command('agent-feedback-instructions', { hidden: true })
   .option(

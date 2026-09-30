@@ -15,6 +15,7 @@ import type { UpgradeDocument } from '../lib/upgrade/future-defaults'
 import { runChildProcess } from '../lib/upgrade/run-child-process'
 import { getAgentName } from '../telemetry/agent-name'
 import {
+  eventAIUpgradeAgentOutcome,
   eventAIUpgradeCLIOutcome,
   eventAIUpgradeRunStarted,
   type AIUpgradeCLIResult,
@@ -591,6 +592,8 @@ export async function spawnNextUpgrade(
         ? `We're upgrading the app in ${JSON.stringify(baseDir)} from Next.js ${result.installedVersion} to ${result.targetVersion} because ${reason}.`
         : `We're adopting the Future Defaults available to the app in ${JSON.stringify(baseDir)}, which already uses Next.js ${result.installedVersion}.`
 
+      // Use the invoking CLI's reporter even after the app's Next.js package changes.
+      const reportCommand = `${getNpxCommand(baseDir)} next@${process.env.__NEXT_VERSION} internal report-ai-upgrade ${context.runId}`
       const prompt = (
         useWorktree: boolean | null
       ) => `Read and follow ${JSON.stringify(sharedGuidePath)} first. Attempt its applicable duplicate checks before changing files. If a check is unavailable, report it and continue. Stop only if you find equivalent work. Then read and follow every applicable instruction in ${JSON.stringify(guidePath)}.
@@ -602,7 +605,9 @@ ${useWorktree === null ? "Follow the user's worktree choice. If they do not spec
 Set \`experimental.agentUpgrade\` to ${JSON.stringify(upgradeType)} in the app's Next.js config as part of this upgrade. Preserve unrelated configuration. If the target Next.js version does not support this option, skip the setting and report why.
 
 ${futureDefaultsPrompt ? `${futureDefaultsPrompt.trimStart()}\n\n` : ''}References:
-${references}`
+${references}
+
+When this task ends, report its outcome once. After completing the requested upgrade and all applicable verification, run \`${reportCommand} success\`. If the attempted upgrade remains unsuccessful after repairs or verification fails, run \`${reportCommand} failure\`. If you stop for duplicate work, user cancellation, or an unavailable prerequisite, do not report success or failure. Explain the outcome to the user separately; never include project details or error text in the telemetry command.`
 
       const { handoffUpgrade } =
         require('../lib/upgrade/harness') as typeof import('../lib/upgrade/harness')
@@ -677,4 +682,24 @@ ${references}`
   upgradeProcess.on('close', (code) => {
     process.exitCode = code ?? 0
   })
+}
+
+export async function reportAIUpgradeOutcome(runId: string, result: string) {
+  // Only accept the bounded result and run ID; project details never enter this event.
+  if (
+    !UUID_PATTERN.test(runId) ||
+    (result !== 'success' && result !== 'failure')
+  ) {
+    throw new Error(
+      'Expected an upgrade run UUID and a success or failure result.'
+    )
+  }
+
+  // Reuse normal telemetry consent and delivery without starting another upgrade.
+  const telemetry = new Telemetry({
+    distDir: join(process.cwd(), '.next'),
+    skipNotify: true,
+  })
+  await telemetry.record(eventAIUpgradeAgentOutcome({ runId, result }))
+  await telemetry.flush()
 }

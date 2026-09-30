@@ -12,7 +12,10 @@ import {
 } from 'fs/promises'
 import * as Log from 'next/dist/build/output/log'
 import cliSelect from 'next/dist/compiled/cli-select'
-import { spawnNextUpgrade } from 'next/dist/cli/next-upgrade'
+import {
+  reportAIUpgradeOutcome,
+  spawnNextUpgrade,
+} from 'next/dist/cli/next-upgrade'
 import { findDir } from 'next/dist/lib/find-pages-dir'
 import { getProjectDir } from 'next/dist/lib/get-project-dir'
 import { handoffUpgrade } from 'next/dist/lib/upgrade/harness'
@@ -88,9 +91,16 @@ const cliVersion: string = require('next/package.json').version
 const restoreDescriptors: Array<() => void> = []
 
 function normalizedBootstrapCalls(): string[][] {
-  return jest
-    .mocked(Log.bootstrap)
-    .mock.calls.map(([message]) => [String(message).replace(/\\+/g, '/')])
+  return jest.mocked(Log.bootstrap).mock.calls.map(([message]) => [
+    String(message)
+      .replace(/\\+/g, '/')
+      // Run IDs are intentionally unique; keep prompt snapshots stable.
+      .replace(/report-ai-upgrade [0-9a-f-]{36}/g, 'report-ai-upgrade <run-id>')
+      .replaceAll(
+        `next@${cliVersion} internal report-ai-upgrade`,
+        'next@<cli-version> internal report-ai-upgrade'
+      ),
+  ])
 }
 
 function recordedUpgradeEvents(): Array<{
@@ -394,6 +404,59 @@ describe('agentic upgrade prompts', () => {
       expect(Log.bootstrap).toHaveBeenCalledTimes(0)
     }
   )
+
+  it.each(['success', 'failure'])(
+    'reports agent %s without starting another upgrade',
+    async (result) => {
+      const runId = '8f290f68-12ca-4651-8b71-4081bba9fb03'
+      await reportAIUpgradeOutcome(runId, result)
+
+      expect(recordedUpgradeEvents()).toEqual([
+        {
+          eventName: 'NEXT_AI_UPGRADE_AGENT_OUTCOME',
+          payload: { schemaVersion: 1, runId, result },
+        },
+      ])
+      expect(prepareUpgrade).toHaveBeenCalledTimes(0)
+      expect(crossSpawn).toHaveBeenCalledTimes(0)
+      expect(
+        jest.mocked(Telemetry).mock.results[0].value.flush
+      ).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('provides a pinned completion reporter for the original run', async () => {
+    await spawnNextUpgrade(
+      '/workspace/app',
+      {
+        revision: 'latest',
+        verbose: false,
+        ai: 'latest',
+      },
+      null
+    )
+
+    const runId = recordedUpgradeEvents().find(
+      ({ eventName }) => eventName === 'NEXT_AI_UPGRADE_RUN_STARTED'
+    )!.payload.runId
+    const prompt = jest.mocked(Log.bootstrap).mock.calls.flat().join('\n')
+    expect(prompt).toContain(
+      `next@${cliVersion} internal report-ai-upgrade ${runId} success`
+    )
+    expect(prompt).toContain(
+      `next@${cliVersion} internal report-ai-upgrade ${runId} failure`
+    )
+  })
+
+  it.each([
+    ['invalid-id', 'success'],
+    ['8f290f68-12ca-4651-8b71-4081bba9fb03', 'unknown'],
+  ])('rejects invalid completion data %s %s', async (runId, result) => {
+    await expect(reportAIUpgradeOutcome(runId, result)).rejects.toThrow(
+      'Expected an upgrade run UUID and a success or failure result.'
+    )
+    expect(Telemetry).toHaveBeenCalledTimes(0)
+  })
 
   it('rejects a worker running a different CLI version', async () => {
     process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION = '0.0.0'
@@ -1474,7 +1537,9 @@ describe('agentic upgrade prompts', () => {
 
      References:
      - https://api.github.com/advisories?affects=next
-     - https://registry.npmjs.org/next",
+     - https://registry.npmjs.org/next
+
+     When this task ends, report its outcome once. After completing the requested upgrade and all applicable verification, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> success\`. If the attempted upgrade remains unsuccessful after repairs or verification fails, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> failure\`. If you stop for duplicate work, user cancellation, or an unavailable prerequisite, do not report success or failure. Explain the outcome to the user separately; never include project details or error text in the telemetry command.",
        ],
      ]
     `)
@@ -1586,7 +1651,9 @@ describe('agentic upgrade prompts', () => {
      Set \`experimental.agentUpgrade\` to "latest" in the app's Next.js config as part of this upgrade. Preserve unrelated configuration. If the target Next.js version does not support this option, skip the setting and report why.
 
      References:
-     - https://registry.npmjs.org/next/latest",
+     - https://registry.npmjs.org/next/latest
+
+     When this task ends, report its outcome once. After completing the requested upgrade and all applicable verification, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> success\`. If the attempted upgrade remains unsuccessful after repairs or verification fails, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> failure\`. If you stop for duplicate work, user cancellation, or an unavailable prerequisite, do not report success or failure. Explain the outcome to the user separately; never include project details or error text in the telemetry command.",
        ],
      ]
     `)
@@ -1826,7 +1893,9 @@ describe('agentic upgrade prompts', () => {
      Complete each adoption. Temporary opt-outs and TODO markers are intermediate work only; do not stop until they are removed and the adoption is fully verified.
 
      References:
-     - https://registry.npmjs.org/next/latest",
+     - https://registry.npmjs.org/next/latest
+
+     When this task ends, report its outcome once. After completing the requested upgrade and all applicable verification, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> success\`. If the attempted upgrade remains unsuccessful after repairs or verification fails, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> failure\`. If you stop for duplicate work, user cancellation, or an unavailable prerequisite, do not report success or failure. Explain the outcome to the user separately; never include project details or error text in the telemetry command.",
          ],
        ],
        "savedInstructions": [
@@ -1928,7 +1997,9 @@ describe('agentic upgrade prompts', () => {
      Complete each adoption. Temporary opt-outs and TODO markers are intermediate work only; do not stop until they are removed and the adoption is fully verified.
 
      References:
-     - https://registry.npmjs.org/next/latest",
+     - https://registry.npmjs.org/next/latest
+
+     When this task ends, report its outcome once. After completing the requested upgrade and all applicable verification, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> success\`. If the attempted upgrade remains unsuccessful after repairs or verification fails, run \`npx next@<cli-version> internal report-ai-upgrade <run-id> failure\`. If you stop for duplicate work, user cancellation, or an unavailable prerequisite, do not report success or failure. Explain the outcome to the user separately; never include project details or error text in the telemetry command.",
        ],
      ]
     `)
