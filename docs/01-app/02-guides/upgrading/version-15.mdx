@@ -626,6 +626,18 @@ export function middleware(request: NextRequest) {
 }
 ```
 
+## Troubleshooting
+
+### Installation fails after upgrading to React 19
+
+- [ ] If another package's peer dependencies reject React 19, revert `react`, `react-dom`, and their types to the previous versions, provided the target Next.js version and router support them.
+- [ ] Retry installation and run the app's checks.
+
+### Installation fails after upgrading to ESLint 9
+
+- [ ] If another package's peer dependencies reject ESLint 9, revert `eslint` to the previous version, provided the target `eslint-config-next` supports it.
+- [ ] Retry installation and run the app's lint checks.
+
 ## Review migration checklist
 
 After applying the changes relevant to your app, review these action items before
