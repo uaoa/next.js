@@ -11,7 +11,7 @@ import { execSync } from 'child_process'
 import path from 'path'
 import pc from 'picocolors'
 import {
-  getPkgManager,
+  getProjectPackageManager,
   getPnpmMajorVersion,
   addPackageDependency,
   runInstallation,
@@ -275,7 +275,9 @@ export async function runUpgrade(
     nonInteractive,
     options.skipAdoption
   )
-  const packageManager: PackageManager = getPkgManager(cwd)
+  // Resolve the app's manager before writing overrides or selecting codemod
+  // commands. The npx launcher's user agent can incorrectly identify it as npm.
+  const packageManager: PackageManager = getProjectPackageManager(cwd)
 
   let shouldRunReactCodemods = false
   let shouldRunReactTypesCodemods = false

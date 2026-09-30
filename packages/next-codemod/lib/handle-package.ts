@@ -1,7 +1,10 @@
 import findUp from 'find-up'
 import execa from 'execa'
+import globby from 'globby'
+import { load } from 'js-yaml'
 import { execSync } from 'node:child_process'
-import { basename } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun'
 
@@ -66,36 +69,96 @@ export function getPkgManager(baseDir: string): PackageManager {
         return 'npm'
       }
     }
-    const lockFile = findUp.sync(
-      [
-        'yarn.lock',
-        'pnpm-lock.yaml',
-        'bun.lock',
-        'bun.lockb',
-        'package-lock.json',
-      ],
-      { cwd: baseDir }
-    )
-    if (lockFile) {
-      switch (basename(lockFile)) {
-        case 'yarn.lock':
-          return 'yarn'
-        case 'pnpm-lock.yaml':
-          return 'pnpm'
-        case 'bun.lock':
-        case 'bun.lockb':
-          return 'bun'
-        case 'package-lock.json':
-          return 'npm'
-        default:
-          return 'npm'
-      }
-    }
-    // No lock file found, default to npm
-    return 'npm'
+    return getProjectPackageManager(baseDir)
   } catch {
     return 'npm'
   }
+}
+
+// The launcher can use a different manager from the app. Only inherit a manager
+// from a workspace that includes the app, not an unrelated parent project.
+export function getProjectPackageManager(baseDir: string): PackageManager {
+  let packageJsonPath = findUp.sync('package.json', { cwd: baseDir })
+  const appDirectory = packageJsonPath
+    ? dirname(packageJsonPath)
+    : resolve(baseDir)
+
+  while (packageJsonPath) {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
+    const { packageManager } = packageJson
+    if (typeof packageManager === 'string') {
+      const match = packageManager.match(/^(npm|pnpm|yarn|bun)@/)
+      if (match) {
+        const directory = dirname(packageJsonPath)
+        if (directory === appDirectory) {
+          return match[1] as PackageManager
+        }
+
+        // Check membership before allowing an ancestor declaration to override
+        // the app's lockfile. Globby also handles excluded workspace patterns.
+        let workspaces = Array.isArray(packageJson.workspaces)
+          ? packageJson.workspaces
+          : packageJson.workspaces?.packages
+        const workspaceFile = join(directory, 'pnpm-workspace.yaml')
+        if (match[1] === 'pnpm' && existsSync(workspaceFile)) {
+          const workspace = load(readFileSync(workspaceFile, 'utf8')) as {
+            packages: string[] | undefined
+          } | null
+          workspaces = workspace?.packages
+        }
+
+        if (
+          Array.isArray(workspaces) &&
+          globby
+            .sync(workspaces, {
+              cwd: directory,
+              onlyDirectories: true,
+              expandDirectories: false,
+              absolute: true,
+            })
+            .some((workspace) => resolve(workspace) === appDirectory)
+        ) {
+          return match[1] as PackageManager
+        }
+      }
+    }
+
+    const directory = dirname(packageJsonPath)
+    const parent = dirname(directory)
+    if (parent === directory) {
+      break
+    }
+    packageJsonPath = findUp.sync('package.json', { cwd: parent })
+  }
+
+  const lockFile = findUp.sync(
+    [
+      'yarn.lock',
+      'pnpm-lock.yaml',
+      'bun.lock',
+      'bun.lockb',
+      'package-lock.json',
+    ],
+    { cwd: baseDir }
+  )
+  if (lockFile) {
+    switch (basename(lockFile)) {
+      case 'yarn.lock':
+        return 'yarn'
+      case 'pnpm-lock.yaml':
+        return 'pnpm'
+      case 'bun.lock':
+      case 'bun.lockb':
+        return 'bun'
+      case 'package-lock.json':
+        return 'npm'
+      default:
+        return 'npm'
+    }
+  }
+
+  // No project manager found, default to npm.
+  return 'npm'
 }
 
 export function uninstallPackage(
@@ -194,6 +257,18 @@ export function runInstallation(
       shell: true,
     })
   } catch (error) {
+    // getPkgManager() would reuse the launcher's npm_config_user_agent and select
+    // the same manager again under npx. Detect the project's manager directly.
+    // Retry only when project detection selects a different manager. A real
+    // installation failure with that manager must still stop the upgrade.
+    const projectPackageManager = getProjectPackageManager(options.cwd)
+    if (projectPackageManager !== packageManager) {
+      console.warn(
+        `${packageManager} install failed. Retrying with the project's package manager: ${projectPackageManager}.`
+      )
+      return runInstallation(projectPackageManager, options)
+    }
+
     throw new Error('Failed to install dependencies', { cause: error })
   }
 }
