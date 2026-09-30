@@ -94,6 +94,8 @@ struct EdgesDataReference {
 
 #[derive(Serialize)]
 struct AnalyzeDataHeader {
+    /// Supported by the agent graph-dump decoder; UI readers ignore this field.
+    pub schema_version: u32,
     pub sources: Vec<AnalyzeSource>,
     pub chunk_parts: Vec<AnalyzeChunkPart>,
     pub output_files: Vec<AnalyzeOutputFile>,
@@ -109,6 +111,8 @@ struct AnalyzeDataHeader {
 
 #[derive(Serialize)]
 struct ModulesDataHeader {
+    /// Supported by the agent graph-dump decoder; UI readers ignore this field.
+    pub schema_version: u32,
     pub modules: Vec<AnalyzeModule>,
     /// Edges from modules to modules
     pub module_dependents: EdgesDataReference,
@@ -255,6 +259,7 @@ impl AnalyzeDataBuilder {
         let mut binary_section = EdgesDataSectionBuilder::new();
 
         let header = AnalyzeDataHeader {
+            schema_version: 1,
             sources: self.sources.into_iter().map(|s| s.source).collect(),
             chunk_parts: self.chunk_parts,
             output_files: self
@@ -356,6 +361,7 @@ impl ModulesDataBuilder {
         let mut binary_section = EdgesDataSectionBuilder::new();
 
         let header = ModulesDataHeader {
+            schema_version: 1,
             modules: self.modules.into_iter().map(|s| s.module).collect(),
             module_dependents: binary_section.add_edges(&module_dependents),
             async_module_dependents: binary_section.add_edges(&async_module_dependents),

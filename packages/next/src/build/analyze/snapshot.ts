@@ -1,4 +1,5 @@
 import * as path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 
 import {
@@ -111,7 +112,23 @@ export async function writeAnalyzeSnapshot({
   const gitMessage = getGitMessage(projectDir)
 
   const createdAt = new Date()
-  const id = makeSnapshotId(createdAt, gitSha)
+  await mkdir(historyDir, { recursive: true })
+  // Reserve a new directory rather than replacing an earlier capture from the
+  // same second. Exclusive mkdir also protects against an unlikely random clash.
+  let reserved: { id: string; directory: string } | undefined
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const id = makeSnapshotId(createdAt, gitSha)
+    const directory = path.join(historyDir, id)
+    try {
+      await mkdir(directory)
+      reserved = { id, directory }
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+  if (!reserved) throw new Error('Could not reserve an analyzer snapshot ID')
+  const { id, directory: snapshotDir } = reserved
 
   const metadata: SnapshotMetadata = {
     id,
@@ -128,30 +145,30 @@ export async function writeAnalyzeSnapshot({
     routeCount: routes.length,
   }
 
-  // 1. Write metadata.json into the live data directory.
-  await writeFile(
-    path.join(dataDir, METADATA_FILENAME),
-    JSON.stringify(metadata, null, 2)
-  )
+  try {
+    // 1. Write metadata.json into the live data directory.
+    await writeFile(
+      path.join(dataDir, METADATA_FILENAME),
+      JSON.stringify(metadata, null, 2)
+    )
 
-  // 2. Snapshot the entire data dir into history/<id>/.
-  const snapshotDir = path.join(historyDir, id)
-  await mkdir(historyDir, { recursive: true })
-  // If the same id already exists (same second + same sha), replace it so the
-  // latest run wins. maxRetries handles transient Windows filesystem locks.
-  await rm(snapshotDir, { recursive: true, force: true, maxRetries: 3 })
-  await cp(dataDir, snapshotDir, { recursive: true })
+    // 2. Copy this build into its reserved historical directory.
+    await cp(dataDir, snapshotDir, { recursive: true })
 
-  // 3. Rebuild the history index.
-  await rewriteHistoryIndex(historyDir, maxHistory)
-
-  return metadata
+    // 3. Rebuild the history index.
+    await rewriteHistoryIndex(historyDir, maxHistory)
+    return metadata
+  } catch (error) {
+    await rm(snapshotDir, { recursive: true, force: true, maxRetries: 3 })
+    throw error
+  }
 }
 
 /**
  * Build the snapshot id from the timestamp and git sha. The format is
- * sortable lexicographically (newest last) which keeps directory listings
- * tidy. Format: `YYYYMMDD-HHMMSS-<shortSha|local>`.
+ * sortable by timestamp at second granularity. A random suffix prevents
+ * captures within a second from replacing one another. Format:
+ * `YYYYMMDD-HHMMSS-<shortSha|local>-<12 hex digits>`.
  */
 function makeSnapshotId(date: Date, gitSha: string | undefined): string {
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -159,7 +176,7 @@ function makeSnapshotId(date: Date, gitSha: string | undefined): string {
     `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}` +
     `-${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}`
   const sha = gitSha ? gitSha.slice(0, 7) : 'local'
-  return `${ts}-${sha}`
+  return `${ts}-${sha}-${randomBytes(6).toString('hex')}`
 }
 
 /**

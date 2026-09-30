@@ -294,11 +294,23 @@ program
   .option('--experimental-app-only', 'Analyzes only App Router routes.')
   .option(
     '--snapshot-name <name>',
-    'Name this snapshot in the metadata, overriding branch/sha in the comparison UI.'
+    'Name a new snapshot or select a uniquely named saved snapshot with --graph-json.'
   )
   .option(
     '-o, --output',
-    'Only write analysis files to disk. Does not start the server.'
+    'Write binary analysis data and UI files, save a snapshot, and exit without serving.'
+  )
+  .option(
+    '--graph-json',
+    'Stream the latest saved snapshot as NDJSON without building (use --snapshot or --snapshot-name to select another).'
+  )
+  .option(
+    '--snapshot <id>',
+    'Select a saved snapshot by ID (requires --graph-json).'
+  )
+  .option(
+    '--route <route>',
+    'Filter graph records to a route (requires --graph-json).'
   )
   .addOption(
     new Option(
@@ -310,17 +322,31 @@ program
       .default(4000)
       .env('PORT')
   )
-  .action((directory: string, options: NextAnalyzeOptions) => {
-    return import('../cli/next-analyze.js')
-      .then((mod) => mod.nextAnalyze(options, directory))
-      .then(() => {
-        if (options.output) {
-          // The Next.js process is held open by something on the event loop. Exit manually like the `build` command does.
-          // TODO: Fix the underlying issue so this is not necessary.
-          process.exit(0)
-        }
-      })
-  })
+  .action(
+    (directory: string, options: NextAnalyzeOptions, command: Command) => {
+      // PORT is for the interactive server. It must not turn replay into a
+      // server invocation just because the environment sets it.
+      if (options.graphJson && command.getOptionValueSource('port') === 'env') {
+        options.serve = false
+      }
+      return import('../cli/next-analyze.js')
+        .then((mod) => mod.nextAnalyze(options, directory))
+        .then(() => {
+          if (options.graphJson) {
+            // NDJSON may exceed a pipe's buffer; drain it before exiting.
+            process.stdout.end(() => process.exit(0))
+          } else if (options.output) {
+            // The Next.js process is held open by something on the event loop. Exit manually like the `build` command does.
+            // TODO: Fix the underlying issue so this is not necessary.
+            process.exit(0)
+          }
+        })
+        .catch((error) => {
+          console.error(error)
+          process.exit(1)
+        })
+    }
+  )
 
 program
   .command('dev', { isDefault: true })

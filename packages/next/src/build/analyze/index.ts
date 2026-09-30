@@ -14,7 +14,7 @@ import { findPagesDir } from '../../lib/find-pages-dir'
 import loadCustomRoutes from '../../lib/load-custom-routes'
 import { generateRoutesManifest } from '../generate-routes-manifest'
 import { normalizeAppPath } from '../../shared/lib/router/utils/app-paths'
-import { writeAnalyzeSnapshot } from './snapshot'
+import { writeAnalyzeSnapshot, type SnapshotMetadata } from './snapshot'
 import http from 'node:http'
 
 // @ts-expect-error types are in @types/serve-handler
@@ -44,7 +44,7 @@ export default async function analyze({
   output = false,
   port = 4000,
   snapshotName,
-}: AnalyzeOptions): Promise<void> {
+}: AnalyzeOptions): Promise<SnapshotMetadata> {
   try {
     // analyze is Turbopack-only. Mirror what parseBundlerArgs does for build/dev
     // so every process.env.TURBOPACK consumer in this run agrees with the bundler choice.
@@ -94,7 +94,7 @@ export default async function analyze({
 
     // Capture this build alongside any prior builds so the analyzer UI can
     // offer it as a comparison baseline in the future.
-    await writeAnalyzeSnapshot({
+    const snapshot = await writeAnalyzeSnapshot({
       projectDir: dir,
       analyzeDir,
       routes,
@@ -120,6 +120,7 @@ export default async function analyze({
     if (!output) {
       await startServer(analyzeDir, port)
     }
+    return snapshot
   } catch (e) {
     const telemetry = traceGlobals.get('telemetry') as Telemetry | undefined
     if (telemetry) {
