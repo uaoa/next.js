@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { resolve } from 'path'
+import { join, resolve } from 'path'
 import {
   access,
   cp,
@@ -294,7 +294,7 @@ describe('agentic upgrade prompts', () => {
     expect(process.env.__NEXT_UPGRADE_USE_CURRENT_CLI).toBeUndefined()
   })
 
-  it('records an AI run before validating its project directory', async () => {
+  it('counts an AI run when resolving its project directory fails', async () => {
     jest.mocked(getProjectDir).mockImplementationOnce(() => {
       throw new Error('Invalid project directory')
     })
@@ -361,7 +361,7 @@ describe('agentic upgrade prompts', () => {
       null
     )
     expect(jest.mocked(Telemetry).mock.results[0].value.projectDir).toBe(
-      resolve('/workspace/app')
+      '/workspace/app'
     )
   })
 
@@ -404,6 +404,85 @@ describe('agentic upgrade prompts', () => {
       expect(Log.bootstrap).toHaveBeenCalledTimes(0)
     }
   )
+
+  it.each([true, 'latest'])(
+    'uses the configured output directory for an AI run with %s',
+    async (ai) => {
+      jest.mocked(loadConfig).mockResolvedValue({
+        default: { distDir: 'custom-output' },
+      } as never)
+
+      await spawnNextUpgrade(
+        '/workspace/app',
+        { revision: 'latest', verbose: false, ai },
+        null
+      )
+
+      expect(Telemetry).toHaveBeenCalledWith({
+        distDir: join('/workspace/app', 'custom-output'),
+        skipNotify: true,
+      })
+    }
+  )
+
+  it('counts a run when loading its config fails', async () => {
+    jest.mocked(loadConfig).mockRejectedValue(new Error('Config failed'))
+
+    await spawnNextUpgrade(
+      '/workspace/app',
+      { revision: 'latest', verbose: false, ai: 'latest' },
+      null
+    )
+
+    expect(
+      recordedUpgradeEvents().map(({ eventName, payload }) => [
+        eventName,
+        payload.result,
+      ])
+    ).toEqual([
+      ['NEXT_AI_UPGRADE_RUN_STARTED', undefined],
+      ['NEXT_AI_UPGRADE_CLI_OUTCOME', 'cli_failure'],
+    ])
+    expect(Log.error).toHaveBeenCalledWith(
+      'Could not prepare the upgrade:',
+      'Config failed'
+    )
+    expect(prepareUpgrade).toHaveBeenCalledTimes(0)
+  })
+
+  it('prepares the upgrade without waiting for start-event delivery', async () => {
+    jest.mocked(Telemetry).mockImplementationOnce(
+      () =>
+        ({
+          record: jest.fn().mockReturnValue(new Promise(() => {})),
+          flush: jest.fn().mockResolvedValue([]),
+        }) as never
+    )
+
+    await spawnNextUpgrade(
+      '/workspace/app',
+      { revision: 'latest', verbose: false, ai: 'latest' },
+      null
+    )
+
+    expect(prepareUpgrade).toHaveBeenCalledWith('/workspace/app', 'latest')
+  })
+
+  it('uses the configured output directory for completion reporting', async () => {
+    jest.mocked(loadConfig).mockResolvedValue({
+      default: { distDir: 'custom-output' },
+    } as never)
+
+    await reportAIUpgradeOutcome(
+      '8f290f68-12ca-4651-8b71-4081bba9fb03',
+      'success'
+    )
+
+    expect(Telemetry).toHaveBeenCalledWith({
+      distDir: resolve('custom-output'),
+      skipNotify: true,
+    })
+  })
 
   it.each(['success', 'failure'])(
     'reports agent %s without starting another upgrade',
@@ -1627,7 +1706,7 @@ describe('agentic upgrade prompts', () => {
       null
     )
 
-    expect(loadConfig).not.toHaveBeenCalled()
+    expect(loadConfig).toHaveBeenCalledTimes(1)
     expect(prepareUpgrade).toHaveBeenCalledWith('/workspace/app', 'latest')
     expect(readFile).toHaveBeenCalledTimes(0)
     expect(writeFile).toHaveBeenCalledTimes(0)

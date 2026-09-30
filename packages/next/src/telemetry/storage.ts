@@ -355,7 +355,9 @@ export class Telemetry {
       },
       postController.signal
     )
+    // Bound delivery even when callers await record/flush; retries share this deadline.
+    const timeout = setTimeout(() => postController.abort(), 5000)
     res._controller = postController
-    return res
+    return res.finally(() => clearTimeout(timeout))
   }
 }

@@ -201,6 +201,64 @@ it('detaches only the supplied nudge event', async () => {
   }
 })
 
+it('bounds telemetry delivery when the transport waits for an abort', async () => {
+  const { Telemetry: ActualTelemetry } = jest.requireActual(
+    '../../packages/next/src/telemetry/storage'
+  )
+  const post = jest.requireMock(
+    '../../packages/next/src/telemetry/post-telemetry-payload'
+  ).postNextTelemetryPayload
+  const originalDisabled = process.env.NEXT_TELEMETRY_DISABLED
+  const originalDebug = process.env.NEXT_TELEMETRY_DEBUG
+  const originalPreferencesDirectory = mockPreferencesDirectory
+  mockPreferencesDirectory = join(directory, 'preferences')
+  delete process.env.NEXT_TELEMETRY_DISABLED
+  delete process.env.NEXT_TELEMETRY_DEBUG
+  let signal: AbortSignal | null = null
+  let transportStarted: () => void
+  const started = new Promise<void>((resolve) => {
+    transportStarted = resolve
+  })
+  post.mockImplementationOnce((_payload: unknown, inputSignal: AbortSignal) => {
+    signal = inputSignal
+    transportStarted()
+    return new Promise<void>((_resolve, reject) => {
+      inputSignal.addEventListener('abort', () => reject(new Error('Aborted')))
+    })
+  })
+  const telemetry = new ActualTelemetry({
+    distDir: join(directory, '.next'),
+    skipNotify: true,
+  })
+  jest.useFakeTimers()
+  try {
+    const pending = telemetry.record({
+      eventName: 'NEXT_AI_UPGRADE_RUN_STARTED',
+      payload: {},
+    })
+    await started
+    expect(signal!.aborted).toBe(false)
+    await jest.advanceTimersByTimeAsync(5000)
+    expect(signal!.aborted).toBe(true)
+    await expect(pending).resolves.toMatchObject({ isRejected: true })
+    await expect(telemetry.flush()).resolves.toEqual([])
+  } finally {
+    jest.useRealTimers()
+    post.mockReset()
+    mockPreferencesDirectory = originalPreferencesDirectory
+    if (originalDisabled === undefined) {
+      delete process.env.NEXT_TELEMETRY_DISABLED
+    } else {
+      process.env.NEXT_TELEMETRY_DISABLED = originalDisabled
+    }
+    if (originalDebug === undefined) {
+      delete process.env.NEXT_TELEMETRY_DEBUG
+    } else {
+      process.env.NEXT_TELEMETRY_DEBUG = originalDebug
+    }
+  }
+})
+
 it('derives project identity from the requested directory across repositories', async () => {
   const { getRawProjectId } = jest.requireActual(
     '../../packages/next/src/telemetry/project-id'
@@ -496,7 +554,14 @@ describe('security upgrade nudge', () => {
           .mockResolvedValue('codex')
       })
       await expect(
-        restartedNudge!(directory, config('security'), 'dev', null, reminder)
+        restartedNudge!(
+          directory,
+          config('security'),
+          'dev',
+          null,
+          reminder,
+          null
+        )
       ).resolves.toBeUndefined()
       expect(send).toHaveBeenCalledTimes(1)
 
@@ -515,7 +580,14 @@ describe('security upgrade nudge', () => {
           .mockResolvedValue('codex')
       })
       await expect(
-        newSessionNudge!(directory, config('security'), 'dev', null, reminder)
+        newSessionNudge!(
+          directory,
+          config('security'),
+          'dev',
+          null,
+          reminder,
+          null
+        )
       ).rejects.toMatchObject({ name: 'SecurityFatalError' })
     } finally {
       process.send = originalSend

@@ -144,33 +144,13 @@ async function prepareUpgradeSkill(
   }
 }
 
-async function resolveAIUpgradeType(
-  directory: string,
-  option: NextUpgradeOptions['ai']
-): Promise<string> {
-  if (typeof option === 'string') {
-    return option
-  }
-
+async function loadAIUpgradeConfig(directory: string) {
   // Read and normalize the app's config without validating legacy options
   // against the current Next.js schema.
   const rawConfig = await loadConfig(PHASE_PRODUCTION_BUILD, directory, {
     rawConfig: true,
   })
-  const config = await normalizeConfig(
-    PHASE_PRODUCTION_BUILD,
-    interopDefault(rawConfig)
-  )
-  const policy = config.experimental?.agentUpgrade
-
-  if (
-    policy === 'security' ||
-    policy === 'latest' ||
-    policy === 'experimental-future'
-  ) {
-    return policy
-  }
-  return 'security'
+  return normalizeConfig(PHASE_PRODUCTION_BUILD, interopDefault(rawConfig))
 }
 
 async function resolveCanaryVersion(): Promise<string> {
@@ -206,9 +186,23 @@ export async function spawnNextUpgrade(
   let baseDir = resolvePath(directory || '.')
 
   if (options.ai) {
-    // Count AI invocations before validating the app directory or preparing guides.
+    // Match dev/build's telemetry storage, including custom output directories in CI.
+    // Retain config errors until after recording the invocation so failed runs still count.
+    let distDir = '.next'
+    let configuredPolicy: unknown = null
+    let configError: unknown = null
+    try {
+      baseDir = getProjectDir(directory, false)
+      const config = await loadAIUpgradeConfig(baseDir)
+      distDir = config.distDir || '.next'
+      configuredPolicy = config.experimental?.agentUpgrade
+    } catch (error) {
+      configError = error
+    }
+
+    // Count AI invocations even when resolving the directory or config fails.
     const telemetry = new Telemetry({
-      distDir: join(baseDir, '.next'),
+      distDir: join(baseDir, distDir),
       skipNotify: true,
     })
     telemetry.projectDir = baseDir
@@ -288,14 +282,16 @@ export async function spawnNextUpgrade(
               ? options.ai
               : null,
         }
-        await telemetry.record(eventAIUpgradeRunStarted(context))
+        telemetry.record(eventAIUpgradeRunStarted(context))
       }
 
       if (correlationError) {
         throw correlationError
       }
+      if (configError) {
+        throw configError
+      }
 
-      baseDir = getProjectDir(directory)
       const expectedVersion = process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
       delete process.env.__NEXT_UPGRADE_EXPECTED_CLI_VERSION
       delete process.env.__NEXT_UPGRADE_USE_CURRENT_CLI
@@ -357,7 +353,14 @@ export async function spawnNextUpgrade(
         )
       }
 
-      const upgradeType = await resolveAIUpgradeType(baseDir, options.ai)
+      const upgradeType =
+        typeof options.ai === 'string'
+          ? options.ai
+          : configuredPolicy === 'security' ||
+              configuredPolicy === 'latest' ||
+              configuredPolicy === 'experimental-future'
+            ? configuredPolicy
+            : 'security'
 
       if (
         upgradeType !== 'security' &&
@@ -696,8 +699,9 @@ export async function reportAIUpgradeOutcome(runId: string, result: string) {
   }
 
   // Reuse normal telemetry consent and delivery without starting another upgrade.
+  const config = await loadAIUpgradeConfig(process.cwd())
   const telemetry = new Telemetry({
-    distDir: join(process.cwd(), '.next'),
+    distDir: join(process.cwd(), config.distDir || '.next'),
     skipNotify: true,
   })
   await telemetry.record(eventAIUpgradeAgentOutcome({ runId, result }))
