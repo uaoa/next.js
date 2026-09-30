@@ -8,7 +8,8 @@
     { "$ref": "#/$defs/module" },
     { "$ref": "#/$defs/route" },
     { "$ref": "#/$defs/output" },
-    { "$ref": "#/$defs/part" }
+    { "$ref": "#/$defs/part" },
+    { "$ref": "#/$defs/unjoined" }
   ],
   "$defs": {
     "index": { "type": "integer", "minimum": 0 },
@@ -134,8 +135,12 @@
         "route": { "type": "string" },
         "route_index": { "$ref": "#/$defs/index" },
         "filename": { "type": "string" },
-        "modules": { "type": "null" },
-        "coverage": { "const": "unknown" },
+        "modules": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/identities" }]
+        },
+        "coverage": {
+          "enum": ["exact", "unsupported", "not_a_chunk", "unknown"]
+        },
         "unresolved_references": { "type": "null" }
       },
       "additionalProperties": true
@@ -159,6 +164,26 @@
         "source_path": { "type": "string" },
         "size": { "$ref": "#/$defs/size" },
         "compressed_size": { "$ref": "#/$defs/size" }
+      },
+      "additionalProperties": true
+    },
+    "unjoined": {
+      "type": "object",
+      "required": [
+        "type",
+        "route",
+        "route_index",
+        "filename",
+        "module_ident",
+        "reason"
+      ],
+      "properties": {
+        "type": { "const": "unjoined" },
+        "route": { "type": "string" },
+        "route_index": { "$ref": "#/$defs/index" },
+        "filename": { "type": "string" },
+        "module_ident": { "$ref": "#/$defs/identity" },
+        "reason": { "type": "string" }
       },
       "additionalProperties": true
     }

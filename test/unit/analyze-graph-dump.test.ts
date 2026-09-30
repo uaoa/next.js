@@ -46,10 +46,14 @@ function file(
   return Buffer.concat([length, json, ...chunks])
 }
 
-function modules(version: number | 'legacy' = 1) {
+function modules(
+  version: number | 'legacy' = 1,
+  extra: Record<string, unknown> = {}
+) {
   return file(
     {
       schema_version: version === 'legacy' ? undefined : version,
+      ...extra,
       modules: [
         { ident: 'app', path: 'app/page.tsx' },
         { ident: 'dep', path: 'dep/index.js' },
@@ -66,11 +70,10 @@ function modules(version: number | 'legacy' = 1) {
   )
 }
 
-function route(entries?: Array<Record<string, unknown>>) {
+function route(extra: Record<string, unknown> = {}, joined = false) {
   return file(
     {
       schema_version: 1,
-      route_entries: entries,
       sources: [
         { parent_source_index: null, path: 'app/' },
         { parent_source_index: 0, path: 'page.tsx' },
@@ -85,11 +88,13 @@ function route(entries?: Array<Record<string, unknown>>) {
       ],
       output_files: [{ filename: 'app.js' }],
       source_roots: [0],
+      ...extra,
     },
     {
       source_children: [[1], []],
       source_chunk_parts: [[], [0]],
       output_file_chunk_parts: [[0]],
+      ...(joined ? { output_file_modules: [[0, 1]] } : {}),
     }
   )
 }
@@ -179,23 +184,25 @@ describe('NDJSON analyzer graph', () => {
   it('validates typed endpoint roots and nested client references', async () => {
     await writeFile(
       join(snapshot, 'analyze.data'),
-      route([
-        {
-          route_entry_id: 'app-client',
-          module_ident: 'app',
-          module_path: 'app/page.tsx',
-          role: 'client',
-          runtime: null,
-          entry_kind: 'client_bootstrap',
-          client_references: [
-            {
-              module_ident: 'dep',
-              module_path: 'dep/index.js',
-              reference_kind: 'ecmascript',
-            },
-          ],
-        },
-      ])
+      route({
+        route_entries: [
+          {
+            route_entry_id: 'app-client',
+            module_ident: 'app',
+            module_path: 'app/page.tsx',
+            role: 'client',
+            runtime: null,
+            entry_kind: 'client_bootstrap',
+            client_references: [
+              {
+                module_ident: 'dep',
+                module_path: 'dep/index.js',
+                reference_kind: 'ecmascript',
+              },
+            ],
+          },
+        ],
+      })
     )
     const { output, records } = await dump('/')
     validateGraphDump(output)
@@ -322,6 +329,70 @@ describe('NDJSON analyzer graph', () => {
     await expect(
       dumpAnalyzeGraph(root, id, '/missing', stream)
     ).rejects.toThrow('Unknown analyzer route')
+    expect(output).toBe('')
+  })
+
+  it('validates unjoined identities and unsupported output coverage', async () => {
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route({
+        unjoined_modules: [
+          {
+            output_file_index: 0,
+            module_ident: 'worker-variant',
+            reason: 'separate_graph',
+          },
+        ],
+      })
+    )
+    const { output, records } = await dump('/')
+    validateGraphDump(output)
+    const unjoined = records.find((record) => record.type === 'unjoined')
+    expect(unjoined).toMatchObject({
+      filename: 'app.js',
+      module_ident: 'worker-variant',
+    })
+    expect(isValidGraphRecord({ ...unjoined, module_ident: null })).toBe(false)
+    const emittedOutput = records.find((record) => record.type === 'output')
+    for (const coverage of ['unsupported', 'not_a_chunk']) {
+      expect(
+        isValidGraphRecord({ ...emittedOutput, coverage, modules: [] })
+      ).toBe(true)
+    }
+  })
+
+  it('joins exact output contents and rejects an indexed fingerprint mismatch', async () => {
+    await writeFile(
+      join(snapshot, 'modules.data'),
+      modules(1, { module_index_hash: 'same-index' })
+    )
+    const extras = {
+      module_index_hash: 'same-index',
+      output_file_module_coverage: ['exact'],
+    }
+    await writeFile(join(snapshot, 'analyze.data'), route(extras, true))
+    const joined = await dump('/')
+    validateGraphDump(joined.output)
+    expect(
+      joined.records.find((record) => record.type === 'output')
+    ).toMatchObject({
+      modules: ['app', 'dep'],
+      coverage: 'exact',
+    })
+    await writeFile(
+      join(snapshot, 'analyze.data'),
+      route({ ...extras, module_index_hash: 'wrong' }, true)
+    )
+    let output = ''
+    const stream = new Writable({
+      write(chunk, _, callback) {
+        output += chunk
+        callback()
+      },
+    })
+    await expect(dumpAnalyzeGraph(root, id, '/', stream)).rejects.toThrow(
+      'fingerprint mismatch'
+    )
     expect(output).toBe('')
   })
 })
